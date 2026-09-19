@@ -3,12 +3,12 @@
 Transcripts of FOMC press conferences come from federalreserve.gov (public domain) and the target range
 for the federal funds rate from FRED. Needs `pdftotext` (poppler) on the path.
 
-    uv run python bench/fed.py prepare     # download every transcript since 2012, cut out each opening statement
+    uv run python bench/fed.py prepare     # download every transcript since the first, in 2011, and cut out each opening statement
     uv run python bench/fed.py run         # sort one statement's sentences, then all the statements
 
 Two sorts, both on "more hawkish about inflation":
   the sentences of the latest opening statement, which is the example at the top of the README
-  every opening statement since 2012 as a whole, scored and set against what the Committee then did
+  every opening statement since April 2011 as a whole, scored and set against what the Committee then did
 
 The check on the second was fixed before it was run: the rank correlation between a statement's score
 and the change in the top of the target range from the day before the press conference to 180 days
@@ -65,7 +65,9 @@ def sentences(text: str) -> list[str]:
 def prepare() -> None:
     (OUT / "statements").mkdir(parents=True, exist_ok=True)
     page = fetch(CALENDAR).decode("utf-8", "replace")
-    days = sorted(set(re.findall(r"fomcpresconf(\d{8})\.htm", page)))
+    # The Fed spells the page both ways (fomcpresconf, fomcpressconf). The calendar page starts in 2012;
+    # the three press conferences of 2011, the first year there were any, are listed by hand.
+    days = sorted(set(re.findall(r"fomcpress?conf(\d{8})\.htm", page)) | {"20110427", "20110622", "20111102"})
     index = []
     for day in days:
         pdf = OUT / f"{day}.pdf"

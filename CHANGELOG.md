@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- The Fed example now covers every FOMC press conference, 95 of them from April 2011: the scraper had
+  missed one page the Fed spells differently and the three conferences of 2011.
+
 ## 0.1.1
 
 - Rewrite the README around what jsort is for: the benchmark discussion, tips and cost notes.

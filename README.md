@@ -27,26 +27,27 @@ jsort asks about a few pairs per text, not all of them, fits a Bradley-Terry sca
 and prints the texts from the top of the scale down. With `-o` each line carries its score and a
 standard error, so the order can be used as a measurement and not only as a ranking.
 
-The same command sorts whole documents. Every opening statement since press conferences began, 91
-of them from January 2012 to this week, as files named by date:
+The same command sorts whole documents. Every opening statement since the first FOMC press
+conference, 95 of them from April 2011 to this week, as files named by date:
 
 ```console
-$ jsort --whole -o --max-chars 16000 "more hawkish about inflation" statements/*.txt | sed -n '1,4p;88,91p'
-6.56	0.41	statements/2022-11-02.txt
-6.08	0.66	statements/2022-09-21.txt
-5.56	0.58	statements/2022-06-15.txt
-5.49	0.30	statements/2022-12-14.txt
--3.33	0.25	statements/2020-11-05.txt
--3.44	0.29	statements/2020-07-29.txt
--3.46	0.24	statements/2021-01-27.txt
--3.56	0.20	statements/2020-06-10.txt
-jsort: 91 texts, 455 comparisons in 10 rounds; reliability 0.98; first-position lean -0.03; 0 calls, 455 cached; 0.1s
+$ jsort --whole -o --max-chars 16000 "more hawkish about inflation" statements/*.txt | sed -n '1,4p;92,95p'
+6.91	0.35	statements/2022-11-02.txt
+6.27	0.49	statements/2022-09-21.txt
+6.06	0.53	statements/2022-07-27.txt
+5.64	0.41	statements/2022-06-15.txt
+-3.01	0.23	statements/2020-11-05.txt
+-3.05	0.22	statements/2020-04-29.txt
+-3.10	0.22	statements/2020-07-29.txt
+-3.46	0.17	statements/2020-06-10.txt
+jsort: 95 texts, 475 comparisons in 10 rounds; reliability 0.98; first-position lean -0.04; 0 calls, 475 cached; 0.1s
 ```
 
-That run came from the cache. The first time it was 26 seconds and six cents, for statements of
-about 1,250 words each. The top four are 2022 hikes of 50 or 75 points. The bottom is the first year of the pandemic.
-By chair, the average score is -2.35 for Bernanke (9 statements), -1.34 for Yellen (16), 0.55 for
-Powell (63) and 2.67 for Warsh (3). `bench/fed.py` builds both files from federalreserve.gov and checks the
+That run came from the cache. The first time it was under half a minute and about seven cents, for
+statements of about 1,250 words each. The top four are 2022 hikes of 75 points. The bottom is the
+first year of the pandemic. This week's statement, a 25-point hike, ranks 15th of the 95. By chair,
+the average score is -2.19 for Bernanke (12 statements), -1.29 for Yellen (16), 0.62 for Powell (64)
+and 2.32 for Warsh (3). `bench/fed.py` builds both files from federalreserve.gov and checks the
 scale against what the Committee did; the results are [below](#how-well-does-it-work).
 
 A thousand short lines take about 5,000 comparisons: roughly a minute and seven cents.
@@ -215,14 +216,14 @@ The default is already on the plateau. `-k 10` and `-k 16` give the same answer,
 there, and the reliability of 0.98 says the same. Five cents' worth of comparisons orders 300 passages
 at r = 0.82, against a ceiling of 0.88.
 
-**Against what the Fed then did.** `bench/fed.py`. The 91 opening statements above, sorted whole on
+**Against what the Fed then did.** `bench/fed.py`. The 95 opening statements above, sorted whole on
 "more hawkish about inflation", against the top of the target range for the federal funds rate (FRED
 series DFEDTARU). Both tests were written into the script before the sort was run. The rank
-correlation between a statement's score and the move announced that day is +0.47 (91 statements).
-With the change in the target over the following 180 days it is +0.38 (87 statements). And the scale
+correlation between a statement's score and the move announced that day is +0.46 (95 statements).
+With the change in the target over the following 180 days it is +0.37 (91 statements). And the scale
 picks up what the rate decision alone does not: the holds of June, September and November 2023
-score near 4, among the ten most hawkish, because the chair held rates and talked tough. It gets
-the shape of fourteen years right. The six statements that announced hikes of 50 or 75 points in
+all rank among the thirteen most hawkish, because the chair held rates and talked tough. It gets
+the shape of fifteen years right. The six statements that announced hikes of 50 or 75 points in
 2022 are the top six, seven of 2023's eight statements fill ranks 7 to 13, and the bottom eight are
 all from March 2020 to January 2021.
 
