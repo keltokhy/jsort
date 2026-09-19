@@ -1,0 +1,22 @@
+name: publish
+# Push a tag like v0.1.0 to release. PyPI trusts this workflow directly (Trusted Publishing),
+# so there is no API token to store, leak or rotate.
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: The tag must match the version in pyproject.toml
+        run: test "v$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" = "$GITHUB_REF_NAME"
+      - run: uv sync
+      - run: uv run pytest -q
+      - run: uv build
+      - run: uv publish
