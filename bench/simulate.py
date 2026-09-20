@@ -15,12 +15,9 @@ import zlib
 
 import numpy as np
 
+from jsort.core import Meter
 from jsort.engine import arank
 from jsort.model import fit
-
-
-class Meter:
-    cost = 0.0
 
 
 class SimulatedJev:

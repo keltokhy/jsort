@@ -56,6 +56,14 @@ def test_same_seed_same_questions():
     assert questions(7) != questions(8)
 
 
+def test_neighbours_does_not_use_a_capped_text_as_the_partner():
+    s = Schedule(4, seed=0)
+    s.count[:] = [0, 5, 0, 5]
+    pairs = s.neighbours(np.array([3., 2., 1., 0.]), np.zeros(4), np.ones(4, bool), 99, 5)
+    assert len(pairs) == 1 and set(pairs[0]) == {0, 2}
+    assert np.all(s.count <= 5)
+
+
 def test_a_small_set_runs_out_of_pairs():
     s = Schedule(3, seed=0)
     asked = s.ring(99)

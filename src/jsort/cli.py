@@ -242,7 +242,9 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
 
     order = list(range(len(records))) if args.keep_order else ranking.order(args.reverse)
     if args.top:
-        order = [i for i in order if not math.isnan(ranking.score[i])][:args.top]
+        if jev is not None:   # failed comparisons are unranked; a singleton or all-identical input is already ordered
+            order = [i for i in order if not math.isnan(ranking.score[i])]
+        order = order[:args.top]
     try:
         write(records, header, ranking, order, args, out)
     except BrokenPipeError:

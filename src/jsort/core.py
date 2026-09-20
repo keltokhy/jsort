@@ -4,7 +4,7 @@ Jev can be reached through TypeSafe's own API or through OpenRouter. Both take o
 number of questions per call and return one typed answer per question. Answers are cached per
 (model, state, question), so packing questions into a call and rerunning a command are both cheap.
 
-jgrep and jlink use the same client; this file is jgrep's, unchanged.
+Based on the client shared by jgrep and jlink.
 """
 
 from __future__ import annotations
@@ -141,6 +141,7 @@ class Meter:
     cost: float = 0.0
     model: str = ""  # the model the API says answered, which resolves aliases like jev-latest
     latencies: list[float] = field(default_factory=list)
+    max_call_cost: float = 0.0
 
     def summary(self) -> str:
         parts = [f"{self.calls:,} calls, {self.cached:,} cached"]
@@ -239,7 +240,9 @@ class Jev:
         cost = usage.get("cost")
         self.meter.calls += 1
         self.meter.input_tokens += tokens
-        self.meter.cost += tokens * PRICE_PER_MTOK / 1e6 if cost is None else cost
+        cost = tokens * PRICE_PER_MTOK / 1e6 if cost is None else cost
+        self.meter.cost += cost
+        self.meter.max_call_cost = max(self.meter.max_call_cost, cost)
         self.meter.latencies.append(seconds)
         self.meter.model = data.get("model") or self.model
         answers = data["answers"]

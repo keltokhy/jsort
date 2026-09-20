@@ -181,6 +181,10 @@ every answer is cached in `~/.cache/jev/answers.sqlite`, and the choice of pairs
 with a higher budget, or a higher `-k`, starts by replaying the same questions from the cache and
 only pays for the new ones.
 
+With a budget, jsort starts with one request and sizes later concurrent batches using the largest
+charge observed so far. Costs are reported after completion, so a final request or an unexpected
+increase in request cost can still take spending above the threshold. `--budget 0` disables this limit.
+
 ## How well does it work
 
 Two checks, run on 2026-09-19 with Jev 1.13 through OpenRouter. Both run the installed `jsort`
@@ -252,8 +256,9 @@ uv run --group bench python bench/readability.py prepare && uv run --group bench
 
 `src/jsort/model.py` is the scale: the fit, the standard errors, reliability and the test `--top`
 uses. `schedule.py` chooses pairs. `engine.py` runs the rounds and is the Python API. `inputs.py`
-reads lines, paragraphs, files, CSV and JSONL. `core.py` is jgrep's client, unchanged: backends,
-retries inside a time budget, the cache, in-flight deduplication and the cost meter.
+reads lines, paragraphs, files, CSV and JSONL. `core.py` is based on jgrep's client: backends,
+retries inside a time budget, the cache, in-flight deduplication and the cost meter, with per-call
+cost tracking for the budget scheduler.
 
 Why a noul and not a choice: `bench/probe.py` asks every ordered pair of ten texts both ways. A
 two-option `choice` and a `noul` ("A ranks higher than B") made the same decisions, 95.6% correct,

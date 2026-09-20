@@ -70,7 +70,7 @@ class Schedule:
             if i in matched or self.count[i] >= per_item:
                 continue
             for j in order[pos + 1: pos + 1 + WINDOW]:
-                if j in matched:
+                if j in matched or self.count[j] >= per_item:
                     continue
                 pair = self._orient(i, j)
                 if pair is not None:

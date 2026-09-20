@@ -172,6 +172,21 @@ def test_one_text_needs_no_key_and_no_call(tmp_path, monkeypatch):
     assert run(["x", write(tmp_path, "e.txt", "")])[:2] == (0, "")
 
 
+@pytest.mark.parametrize("lines", [["only v=1"], ["same v=1"] * 3])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_top_keeps_texts_when_no_comparison_is_needed(tmp_path, monkeypatch, lines, reverse):
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    f = write(tmp_path, "a.txt", "\n".join(lines) + "\n")
+    code, out, _, fake = run(["x", f, "--top", "1"] + (["-r"] if reverse else []))
+    assert (code, out, fake.bodies) == (0, lines[0] + "\n", [])
+
+
+def test_top_does_not_return_texts_whose_comparisons_failed(tmp_path):
+    f = write(tmp_path, "a.txt", "POISON v=1\nPOISON v=2\n")
+    code, out, err, _ = run(["x", f, "--top", "1"])
+    assert code == 2 and out == "" and "a comparison failed" in err
+
+
 def test_budget_stops_the_questions_but_still_sorts(tmp_path):
     f = write(tmp_path, "a.txt", "\n".join(LINES) + "\n")
     code, out, err, fake = run(["x", f, "--budget", "0.02", "-j", "1"], cost=0.001)
@@ -265,3 +280,6 @@ def test_python_api(tmp_path):
         return jsort.rank(LINES, "more urgent", transport=httpx.MockTransport(Fake()))
     import asyncio
     assert [LINES[i] for i in asyncio.run(inside_a_running_loop()).order()] == SORTED
+
+    with pytest.raises(ValueError, match="concurrency"):
+        jsort.rank(LINES, "x", concurrency=0, transport=httpx.MockTransport(Fake()))
