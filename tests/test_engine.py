@@ -87,6 +87,34 @@ def test_budget_is_per_run_when_reusing_a_client():
     asyncio.run(go())
 
 
+def test_concurrent_rankings_have_independent_budgets():
+    async def go():
+        endpoint = ChargedEndpoint(0.01)
+        jev = Jev("test-key", transport=httpx.MockTransport(endpoint))
+        try:
+            results = await asyncio.gather(*(
+                arank([f"{prefix}{i}" for i in range(10)], "higher", jev, budget=0.02)
+                for prefix in ("a", "b")
+            ))
+            assert all(r.over_budget and r.asked == 2 for r in results)
+            assert endpoint.calls == 4 and endpoint.peak > 1
+            assert jev.meter.cost == pytest.approx(0.04)
+        finally:
+            await jev.close()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("options", [
+    {"top": -4}, {"top": 0}, {"top": 1.5}, {"per_item": 1}, {"per_item": 2.5},
+    {"max_chars": 0}, {"max_chars": 1.5}, {"concurrency": 1.5},
+])
+def test_invalid_ranking_options_fail_before_any_request(options):
+    endpoint = ChargedEndpoint(0.01)
+    with pytest.raises(ValueError):
+        run(endpoint, **options)
+    assert endpoint.calls == 0
+
+
 def test_zero_concurrency_raises_instead_of_hanging():
     async def go():
         endpoint = ChargedEndpoint(0.01)

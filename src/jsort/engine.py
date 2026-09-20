@@ -6,6 +6,7 @@ import asyncio
 import math
 import os
 from dataclasses import dataclass, field
+from numbers import Integral
 
 import numpy as np
 
@@ -58,13 +59,19 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
     Identical and blank texts are handled here: duplicates share one score and blanks get none.
     budget defaults to $JSORT_BUDGET, else 1.00, per run; 0 disables the limit.
     """
-    if concurrency < 1:
-        raise ValueError("concurrency must be at least 1")
+    if not description.strip():
+        raise ValueError("description must not be empty")
+    for name, value, minimum in (("per_item", per_item, 2), ("concurrency", concurrency, 1),
+                                 ("max_chars", max_chars, 1), ("top", top, 1)):
+        if name == "top" and value is None:
+            continue
+        if not isinstance(value, Integral) or value < minimum:
+            raise ValueError(f"{name} must be an integer of at least {minimum}")
     if budget is None:
         budget = float(os.environ.get("JSORT_BUDGET") or 1.0)
     if not math.isfinite(budget) or budget < 0:
         raise ValueError("budget must be finite and nonnegative")
-    initial_cost = jev.meter.cost
+    spent = max_call_cost = 0.0
     shown = [t[:max_chars] for t in texts]
     unique: dict[str, int] = {}
     member = [unique.setdefault(t, len(unique)) if t.strip() else -1 for t in shown]
@@ -78,11 +85,15 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
     ys: list[float] = []
     out = Ranking.unscored(len(texts))
     sem = asyncio.Semaphore(concurrency)
-    total = math.ceil(n * max(per_item, 2) / 2)   # the opening ring alone is two comparisons per text
+    total = math.ceil(n * per_item / 2)   # the opening ring alone is two comparisons per text
+
+    def record_cost(cost: float) -> None:
+        nonlocal spent, max_call_cost
+        spent += cost
+        max_call_cost = max(max_call_cost, cost)
 
     def remaining_budget() -> float:
-        spent = jev.meter.cost - initial_cost
-        # Reusing a client's cumulative float meter can leave a rounding-sized remainder at the limit.
+        # Roundoff at the limit must not buy an extra request.
         return 0.0 if math.isclose(spent, budget, rel_tol=1e-12) else budget - spent
 
     async def compare(i: int, j: int):
@@ -93,7 +104,7 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
                 out.over_budget = True
                 return None
             try:
-                answer = await jev.ask({"A": items[i], "B": items[j]}, {"q": q})
+                answer = await jev.ask({"A": items[i], "B": items[j]}, {"q": q}, on_cost=record_cost)
                 return i, j, float(answer["q"]["noul"])
             except JevError as e:
                 out.errors.append(str(e))
@@ -135,7 +146,7 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
                     break
                 # Learn the price with one request, then reserve the largest observed charge per
                 # in-flight request. A final request or an unexpected price increase can still overshoot.
-                cost = jev.meter.max_call_cost
+                cost = max_call_cost
                 size = min(concurrency, max(1, int(remaining / cost))) if cost else 1
             batch = pairs[offset:offset + size]
             offset += len(batch)
@@ -177,6 +188,9 @@ def rank(texts: list[str], description: str, *, api: str | None = None, model: s
     import concurrent.futures
 
     from .core import Cache, resolve_backend
+
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and greater than 0")
 
     async def go() -> Ranking:
         backend, key = resolve_backend(api)

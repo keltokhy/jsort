@@ -187,6 +187,48 @@ def test_top_does_not_return_texts_whose_comparisons_failed(tmp_path):
     assert code == 2 and out == "" and "a comparison failed" in err
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("nonblank", [False, True])
+def test_trivial_top_excludes_blank_fields(tmp_path, monkeypatch, reverse, nonblank):
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    f = write(tmp_path, "a.csv", "id,text\n1,\n" + ("2,only v=1\n" if nonblank else ""))
+    code, out, _, fake = run(["x", f, "--csv", "--field", "text", "--top", "1"] + (["-r"] if reverse else []))
+    assert code == 0 and fake.bodies == []
+    assert out == "id,text\n" + ("2,only v=1\n" if nonblank else "")
+
+
+def test_trivial_top_excludes_empty_files_and_blank_prefixes(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    empty = write(tmp_path, "empty.txt", "")
+    blank = write(tmp_path, "blank.txt", "   ignored after truncation")
+    full = write(tmp_path, "full.txt", "only v=1")
+    code, out, _, fake = run(["x", "--whole", empty, blank, full, "--top", "1", "--max-chars", "3"])
+    assert (code, out, fake.bodies) == (0, full + "\n", [])
+
+
+@pytest.mark.parametrize("csv_input", [False, True])
+def test_repeated_stdin_remains_open(monkeypatch, csv_input):
+    content = b"\xef\xbb\xbftext\r\nonly v=1\r\n" if csv_input else b"\xef\xbb\xbfonly v=1\r\n"
+    source = io.TextIOWrapper(io.BytesIO(content))
+    monkeypatch.setattr("sys.stdin", source)
+    options = ["--csv", "--field", "text"] if csv_input else []
+    try:
+        code, out, _, fake = run(["x", "-", "-", *options])
+        assert code == 0 and fake.bodies == []
+        assert out == ("text\nonly v=1\n" if csv_input else "only v=1\n")
+        assert not source.closed and source.read() == ""
+    finally:
+        source.close()
+
+
+def test_jsonl_rejects_non_objects_but_keeps_valid_records(tmp_path):
+    f = write(tmp_path, "a.jsonl", '["v=1"]\n{"0": "v=2"}\nnull\n')
+    code, out, err, fake = run(["x", f, "--jsonl", "--field", "0", "-o"])
+    assert code == 2 and fake.bodies == []
+    assert err.count("expected a JSON object") == 2
+    assert json.loads(out)["0"] == "v=2"
+
+
 def test_budget_stops_the_questions_but_still_sorts(tmp_path):
     f = write(tmp_path, "a.txt", "\n".join(LINES) + "\n")
     code, out, err, fake = run(["x", f, "--budget", "0.02", "-j", "1"], cost=0.001)
@@ -283,3 +325,11 @@ def test_python_api(tmp_path):
 
     with pytest.raises(ValueError, match="concurrency"):
         jsort.rank(LINES, "x", concurrency=0, transport=httpx.MockTransport(Fake()))
+
+
+@pytest.mark.parametrize("options", [{"top": -4}, {"timeout": 0}, {"timeout": float("nan")}])
+def test_python_options_are_rejected_before_billing(options):
+    fake = Fake()
+    with pytest.raises(ValueError):
+        jsort.rank(LINES[:3], "x", transport=httpx.MockTransport(fake), **options)
+    assert fake.bodies == []

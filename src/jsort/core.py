@@ -2,7 +2,7 @@
 
 Jev can be reached through TypeSafe's own API or through OpenRouter. Both take one state and any
 number of questions per call and return one typed answer per question. Answers are cached per
-(model, state, question), so packing questions into a call and rerunning a command are both cheap.
+(endpoint, model, state, question), so packing questions into a call and rerunning a command are both cheap.
 
 Based on the client shared by jgrep and jlink.
 """
@@ -107,7 +107,7 @@ def resolve_backend(name: str | None = None) -> tuple[Backend, str]:
 
 
 class Cache:
-    """Answers on disk, keyed on the exact model, state and question."""
+    """Answers on disk, keyed on the endpoint, exact model, state and question."""
 
     def __init__(self, path: Path | None = None):
         path = path or cache_path()
@@ -120,8 +120,8 @@ class Cache:
                         "(key TEXT PRIMARY KEY, answer TEXT NOT NULL, at REAL NOT NULL) WITHOUT ROWID")
 
     @staticmethod
-    def key(model: str, state, question: dict) -> str:
-        blob = json.dumps([model, state, question], sort_keys=True, ensure_ascii=False)
+    def key(model: str, state, question: dict, *, endpoint: str) -> str:
+        blob = json.dumps([endpoint, model, state, question], sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(blob.encode()).hexdigest()
 
     def get(self, key: str) -> dict | None:
@@ -172,9 +172,12 @@ class Jev:
     async def close(self) -> None:
         await self.http.aclose()
 
-    async def ask(self, state, questions: dict[str, dict]) -> dict[str, dict]:
-        """Answer every question about one state. Only questions missing from the cache are sent."""
-        keys = {qid: Cache.key(self.model, state, q) for qid, q in questions.items()}
+    async def ask(self, state, questions: dict[str, dict], *, on_cost=None) -> dict[str, dict]:
+        """Answer every question about one state. Only questions missing from the cache are sent.
+
+        on_cost receives charges for requests started by this call; cached and shared answers are free.
+        """
+        keys = {qid: Cache.key(self.model, state, q, endpoint=self.url) for qid, q in questions.items()}
         answers = {}
         if self.cache:
             for qid, k in keys.items():
@@ -190,7 +193,7 @@ class Jev:
         flight = "|".join(sorted(keys[qid] for qid in misses))
         task = self._flights.get(flight)
         if task is None:
-            task = asyncio.ensure_future(self._call(state, misses))
+            task = asyncio.ensure_future(self._call(state, misses, on_cost=on_cost))
             self._flights[flight] = task
             task.add_done_callback(lambda _: self._flights.pop(flight, None))
         else:
@@ -198,7 +201,7 @@ class Jev:
         by_key = await task
         return answers | {qid: by_key[keys[qid]] for qid in misses}
 
-    async def _call(self, state, questions: dict[str, dict]) -> dict[str, dict]:
+    async def _call(self, state, questions: dict[str, dict], *, on_cost=None) -> dict[str, dict]:
         """One request, retried inside a total time budget. Returns answers by cache key."""
         body = {"model": self.model, "state": state, "questions": questions}
         deadline = time.monotonic() + self.timeout
@@ -221,7 +224,7 @@ class Jev:
             else:
                 data = _json(r)
                 if r.status_code == 200 and "answers" in data:
-                    return self._record(state, questions, data, time.perf_counter() - t0)
+                    return self._record(state, questions, data, time.perf_counter() - t0, on_cost=on_cost)
                 detail = _detail(data) or r.text[:200]
                 if r.status_code in FATAL:
                     raise JevFatal(f"{self.backend.name} said {r.status_code}: {detail}")
@@ -234,7 +237,7 @@ class Jev:
                 await asyncio.sleep(max(0.0, min(pause, deadline - time.monotonic())))
         raise JevError(f"gave up after {self.timeout:g}s ({last})")
 
-    def _record(self, state, questions: dict, data: dict, seconds: float) -> dict[str, dict]:
+    def _record(self, state, questions: dict, data: dict, seconds: float, *, on_cost=None) -> dict[str, dict]:
         usage = data.get("usage") or {}
         tokens = usage.get("input_tokens") or 0
         cost = usage.get("cost")
@@ -243,6 +246,8 @@ class Jev:
         cost = tokens * PRICE_PER_MTOK / 1e6 if cost is None else cost
         self.meter.cost += cost
         self.meter.max_call_cost = max(self.meter.max_call_cost, cost)
+        if on_cost is not None:
+            on_cost(cost)
         self.meter.latencies.append(seconds)
         self.meter.model = data.get("model") or self.model
         answers = data["answers"]
@@ -253,7 +258,7 @@ class Jev:
             if qid not in answers:
                 raise JevError(f"no answer returned for question {qid!r}")
             _validate_answer(qid, q, answers[qid])
-            k = Cache.key(self.model, state, q)
+            k = Cache.key(self.model, state, q, endpoint=self.url)
             out[k] = answers[qid]
         # Validate the entire response before storing any part of it.
         if self.cache:

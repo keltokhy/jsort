@@ -61,7 +61,9 @@ uv tool install jev-sort        # the command it installs is jsort
 jsort finds a key the way [jgrep](https://github.com/keltokhy/jgrep) does: `TYPESAFE_API_KEY`,
 `OPENROUTER_API_KEY`, or a System One gateway (`JEV_GATEWAY_URL` and `JEV_GATEWAY_API_KEY`), from the
 environment or from `~/.config/jev/typesafe.key`, `openrouter.key` or `gateway.key`. Force a choice
-with `--api` or `JEV_API`. The two tools share one answer cache.
+with `--api` or `JEV_API`. The two tools share one cache file. jsort keys answers by endpoint as well
+as model and question, so switching gateways cannot reuse another gateway's answers. Older entries
+without endpoint information remain on disk but are not reused.
 
 ## Use
 
@@ -149,7 +151,8 @@ r.reliability, r.lean, r.asked
 `r.score`, `r.se` and `r.comparisons` are arrays aligned with the input. The command's seat belt
 applies here too: spending stops at `budget=` dollars, by default `$JSORT_BUDGET` or 1.00, and
 `r.over_budget` says whether it was reached. It works inside a notebook. `jsort.arank` is the same
-thing as a coroutine, for a client you already hold.
+thing as a coroutine, for a client you already hold. Each concurrent ranking has its own budget;
+a shared request is charged to the ranking that starts it, and cached answers are free.
 
 ## How it chooses pairs
 

@@ -194,11 +194,12 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         return 2 if problems else 0
 
     texts = [r.text for r in records]
+    shown = [t[:args.max_chars] for t in texts]
     truncated = sum(len(t) > args.max_chars for t in texts)
     show_stats = args.stats or (args.stats is None and err.isatty())
     jev = None
     t0 = time.perf_counter()
-    if len({t[:args.max_chars] for t in texts if t.strip()}) < 2:
+    if len({t for t in shown if t.strip()}) < 2:
         ranking = Ranking.unscored(len(texts))   # nothing to compare, so no key is needed either
     else:
         try:
@@ -244,6 +245,8 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     if args.top:
         if jev is not None:   # failed comparisons are unranked; a singleton or all-identical input is already ordered
             order = [i for i in order if not math.isnan(ranking.score[i])]
+        else:
+            order = [i for i in order if shown[i].strip()]
         order = order[:args.top]
     try:
         write(records, header, ranking, order, args, out)

@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 STDIN = "(standard input)"
@@ -45,10 +46,17 @@ def as_text(value) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
+@contextmanager
 def _open(name: str):
     if name == "-":
-        return io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8-sig", errors="replace", newline="")
-    return open(name, encoding="utf-8-sig", errors="replace", newline="")   # -sig drops the byte-order mark Excel writes
+        stream = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8-sig", errors="replace", newline="")
+        try:
+            yield stream
+        finally:
+            stream.detach()   # the caller owns stdin's buffer
+    else:
+        with open(name, encoding="utf-8-sig", errors="replace", newline="") as stream:
+            yield stream     # -sig drops the byte-order mark Excel writes
 
 
 def read(files: list[str], args) -> tuple[list[Record], list[str] | None, list[str]]:
@@ -80,6 +88,9 @@ def read(files: list[str], args) -> tuple[list[Record], list[str] | None, list[s
                             continue
                         try:
                             obj = json.loads(line)
+                            if not isinstance(obj, dict):
+                                problems.append(f"{label}:{lineno}: expected a JSON object")
+                                continue
                             records.append(Record(as_text(lookup(obj, args.field)), line, label, lineno, obj))
                         except ValueError:
                             problems.append(f"{label}:{lineno}: not valid JSON")
