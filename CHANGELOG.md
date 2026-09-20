@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Isolate cached answers by provider, endpoint, and model, and reset per-run budgets.
+- Handle exhausted budgets, trivial top results, and comparison caps without unnecessary calls.
+- Validate ranking inputs, including malformed or non-finite values, before scheduling comparisons.
+
 ## 0.1.2
 
 - The Fed example now covers every FOMC press conference, 95 of them from April 2011: the scraper had

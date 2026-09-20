@@ -1,6 +1,6 @@
 [project]
 name = "jev-sort"
-version = "0.1.2"
+version = "0.1.3"
 description = "sort by meaning: order lines along a plain-English dimension, from pairwise comparisons judged by TypeSafe's Jev model"
 readme = "README.md"
 license = "MIT"
