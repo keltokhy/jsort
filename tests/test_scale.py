@@ -793,3 +793,28 @@ def test_a_closed_pipe_ends_a_stream_quietly_even_before_the_first_row(tmp_path,
             assert code == 0 and "Traceback" not in err
             assert not extra or oracle.bodies == []          # a stream whose reader has gone asks nothing more
     assert run(["x", empty, "--csv", "--field", "note"], out=Closed())[0] == 0      # an ordinary sort's header as well
+
+
+def test_a_stand_in_judge_can_sort_save_and_place():
+    # bench/simulate.py drives arank and aplace with an object that has only `ask` and `meter`. Keep that working.
+    from jsort.core import Meter
+    from jsort.engine import arank
+
+    class Judge:
+        meter = Meter()
+
+        async def ask(self, state, questions, *, on_cost=None, provenance=None):
+            if provenance is not None:
+                provenance["q"] = {"resolved_model": "stand-in", "source": "api"}
+            value = lambda t: float(re.search(r"v=(-?[\d.]+)", t).group(1))
+            return {"q": {"noul": 1 / (1 + math.exp(-(value(state["A"]) - value(state["B"]))))}}
+
+    async def go():
+        r = await arank(BASE[:30], "x", Judge())
+        built = r.scale(10)
+        assert built.model["answered"] == {"stand-in": r.asked} and built.answered_by == "stand-in"
+        for budget in (0, 1.0):
+            p = await aplace(HELD[:5], built, Judge(), budget=budget, any_model=True)
+            assert p.asked == 50 and not np.isnan(p.score).any() and not p.partial.any()
+
+    asyncio.run(go())

@@ -163,6 +163,7 @@ class Placer:
         self.scores = np.array([a.score for a in scale.anchors])     # highest first, as the scale keeps them
         self.known = {a.text: a for a in scale.anchors}
         self.purse, self.sem = _Purse(budget, concurrency), asyncio.Semaphore(concurrency)
+        self.model = getattr(jev, "model", None) or ""      # only to size a request; a stand-in judge may have none
         self.longest = max((a.text for a in scale.anchors), key=len)
         self.planned = min(self.per_item, 2 * len(scale.anchors))     # an anchor is met twice at most
         self.asked = self.rounds = self.unverified = 0
@@ -238,7 +239,7 @@ class Placer:
             return anchor.score, anchor.se, anchor.comparisons, 0, False
 
         # Room for every comparison the text may ask for, each priced as if it met the longest anchor.
-        reserve = self.planned * _tokens(self.jev.model, self._state(shown, self.longest, True), self.scale.question)
+        reserve = self.planned * _tokens(self.model, self._state(shown, self.longest, True), self.scale.question)
         admitted_at = await self.purse.admit(reserve, lambda: self.halted)
         if admitted_at is None:
             return nowhere
@@ -266,7 +267,7 @@ class Placer:
                 leads = not leads
                 met.setdefault(a, []).append(position)
                 state = self._state(shown, self.scale.anchors[a].text, position)
-                asks.append((a, position, state, _tokens(self.jev.model, state, self.scale.question)))
+                asks.append((a, position, state, _tokens(self.model, state, self.scale.question)))
             self.rounds = max(self.rounds, r + 1)
             answers = [] if self.fatal else await asyncio.gather(*(self._compare(ask[2], ask[3]) for ask in asks))
             for (a, position, _, _), y in zip(asks, answers):
