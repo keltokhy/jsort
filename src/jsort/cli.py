@@ -90,7 +90,8 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--unordered", action="store_true",
                     help="with --scale, print each text as soon as it is placed, not in input order")
     ap.add_argument("--any-model", action="store_true",
-                    help="with --scale, place even though the API, endpoint or model is not the one the scale was built with")
+                    help="with --scale, place even though the API, endpoint or model is not the one the scale was built "
+                         "with; with --save-scale, save even though the answers do not all name one model")
     ap.add_argument("-j", "--concurrency", type=int, default=32, metavar="N", help="calls in flight (default 32)")
     ap.add_argument("--timeout", type=float, default=15.0, metavar="SECONDS",
                     help="give up on a comparison after this long, retries included (default 15)")
@@ -183,7 +184,7 @@ def summary(records: list[Record], ranking: Ranking, jev: Jev) -> str:
 
 
 def closing_notes(args, scale: Scale | None, *, truncated: int, ragged: int, over_budget: bool, asked: int,
-                  unscored: int, beyond: tuple[int, int], err) -> None:
+                  unscored: int, beyond: tuple[int, int], unverified: int = 0, err) -> None:
     """What the user should know about the run, after the output: the same lines whether it sorted or placed."""
     if ragged:
         print(f"jsort: {ragged:,} rows have more values than the header has columns; the surplus is kept at the end "
@@ -198,6 +199,10 @@ def closing_notes(args, scale: Scale | None, *, truncated: int, ragged: int, ove
     if unscored:
         print(f"jsort: {unscored:,} texts " + ("could not be placed and have no score" if scale else
                                                "were never compared and are listed last"), file=err)
+    if unverified:
+        print(f"jsort: {unverified:,} of the {asked:,} answers did not say which model gave them (cache entries written "
+              f"before jsort recorded it, or an API that does not name its model), so they could not be checked against "
+              f"the scale's, {scale.answered_by}; --no-cache asks again", file=err)
     if sum(beyond):
         low, high = scale.span
         print(f"jsort: {sum(beyond):,} texts fell beyond the scale's anchors ({beyond[0]:,} above {_number(high, 2)}, "
@@ -256,8 +261,8 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         (not (args.scale and args.save_scale), "--save-scale saves the scale a run fits, and a --scale run fits none"),
         (args.anchors is None or bool(args.save_scale), "--anchors goes with --save-scale"),
         (args.anchors is None or args.anchors >= 2, "--anchors takes 2 or more"),
-        (bool(args.scale) or not (args.se_target is not None or args.unordered or args.any_model),
-         "--se-target, --unordered and --any-model go with --scale"),
+        (bool(args.scale) or not (args.se_target is not None or args.unordered), "--se-target and --unordered go with --scale"),
+        (bool(args.scale or args.save_scale) or not args.any_model, "--any-model goes with --scale or --save-scale"),
         (args.se_target is None or (math.isfinite(args.se_target) and args.se_target > 0),
          "--se-target must be finite and greater than 0"),
         (not (args.unordered and (args.keep_order or args.top)), "--unordered cannot be combined with --keep-order or --top"),
@@ -375,7 +380,7 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     saved = None
     if args.save_scale:
         try:
-            saved = ranking.scale(args.anchors or DEFAULT_ANCHORS, field=args.field,
+            saved = ranking.scale(args.anchors or DEFAULT_ANCHORS, field=args.field, any_model=args.any_model,
                                   unit="whole" if args.whole else "para" if args.para else "field" if args.field else "line")
             saved.save(args.save_scale)
         except (ScaleError, OSError) as e:
@@ -398,7 +403,8 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     beyond = (int((ranking.beyond > 0).sum()), int((ranking.beyond < 0).sum())) if placing else (0, 0)
     closing_notes(args, scale, truncated=truncated, ragged=sum(1 for r in records if r.data.get(None)) if args.csv else 0,
                   over_budget=ranking.over_budget, asked=ranking.asked,
-                  unscored=unscored if jev is not None or placing else 0, beyond=beyond, err=err)
+                  unscored=unscored if jev is not None or placing else 0, beyond=beyond,
+                  unverified=ranking.unverified if placing else 0, err=err)
     if ranking.reliability is not None and ranking.reliability < SHAKY:
         print(f"jsort: reliability {ranking.reliability:.2f}: two halves of the comparisons give different orders. "
               "Raise -k, or reword the description so that any two of these texts can be compared on it", file=err)
@@ -601,7 +607,8 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
     if len(errors) > MAX_ERRORS_SHOWN:
         print(f"jsort: and {len(errors) - MAX_ERRORS_SHOWN:,} more failed comparisons", file=err)
     closing_notes(args, scale, truncated=s["truncated"], ragged=s["ragged"], over_budget=bool(placer and placer.over_budget),
-                  asked=placer.asked if placer else 0, unscored=s["unscored"], beyond=(s["above"], s["below"]), err=err)
+                  asked=placer.asked if placer else 0, unscored=s["unscored"], beyond=(s["above"], s["below"]),
+                  unverified=placer.unverified if placer else 0, err=err)
     if show_stats and placer is not None:
         print(f"jsort: {s['seen']:,} texts placed against {len(scale.anchors):,} anchors, {placer.asked:,} comparisons; "
               f"{s['jev'].meter.summary()}; {time.perf_counter() - t0:.1f}s", file=err)

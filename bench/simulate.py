@@ -29,7 +29,9 @@ class SimulatedJev:
         e = np.random.default_rng(zlib.crc32(f"{a},{b}".encode())).standard_normal() * self.quirk
         return 1 / (1 + math.exp(-(self.theta[a] - self.theta[b] + self.gamma + e)))
 
-    async def ask(self, state, questions, *, on_cost=None):
+    async def ask(self, state, questions, *, on_cost=None, provenance=None):
+        if provenance is not None:       # a saved scale names the model that answered, so the judge has to have a name
+            provenance["q"] = {"resolved_model": "simulated-judge", "source": "api"}
         return {"q": {"type": "noul", "noul": self.p(int(state["A"]), int(state["B"]))}}
 
 

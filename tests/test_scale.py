@@ -95,7 +95,7 @@ def test_saving_writes_what_was_asked_of_whom_and_anchors_across_the_range(tmp_p
     assert data["schema_version"] == 1 and data["description"] == DESCRIPTION
     assert data["question"] == {"type": "noul", "instructions": f'Text A ranks higher than text B on this criterion: "{DESCRIPTION}"'}
     assert data["model"] == {"api": "openrouter", "endpoint": "https://openrouter.ai/api/alpha/decisions",
-                             "requested": "~typesafe/jev-latest", "answered": "typesafe/jev-1.13"}
+                             "requested": "~typesafe/jev-latest", "answered": {"typesafe/jev-1.13": 450}, "unknown_answers": 0}
     assert data["input"] == {"max_chars": 8000, "unit": "line", "field": None}
     fit = data["fit"]
     assert fit["texts"] == 90 and fit["comparisons"] == 450 and fit["reliability"] > 0.9 and abs(fit["lean"] + 0.025) < 0.02
@@ -296,11 +296,11 @@ def test_another_model_is_refused_unless_asked_for(tmp_path, scale, monkeypatch)
     # The alias the scale asked for now reaches a newer model. Only the API's reply can show that.
     code, out, err, oracle = run(["--scale", scale, held, "--no-cache", "-j", "1"], model="typesafe/jev-1.14")
     assert code == 2 and out == "" and len(oracle.bodies) == 1
-    assert "typesafe/jev-1.13" in err and "typesafe/jev-1.14 is answering now" in err
+    assert "typesafe/jev-1.13" in err and "the answers now come from typesafe/jev-1.14" in err
     assert run(["--scale", scale, held, "--no-cache", "--any-model"], model="typesafe/jev-1.14")[0] == 0
     for extra in (["--keep-order"], ["--unordered"]):
         code, out, err, _ = run(["--scale", scale, held, "--no-cache", *extra], model="typesafe/jev-1.14")
-        assert code == 2 and out == "" and "is answering now" in err
+        assert code == 2 and out == "" and "the answers now come from typesafe/jev-1.14" in err
     # Pinning the model that answered is as good as the alias that reached it.
     assert run(["--scale", scale, held, "--no-cache", "--model", "typesafe/jev-1.13"])[0] == 0
 
@@ -539,3 +539,73 @@ def test_python_api(tmp_path):
     async def inside_a_running_loop():                    # as in a notebook
         return jsort.place(HELD[:3], scale, transport=transport())
     assert asyncio.run(inside_a_running_loop()).asked == 30
+
+
+# ---- Who answered: the scale may only name a model it can vouch for ------------------------------------------------
+
+def forget_who_answered(tmp_path):
+    """Rewrite every cached answer the way jsort 0.1.3 and jgrep write them: the answers table only, a new time."""
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "cache" / "jev" / "answers.sqlite", isolation_level=None)
+    rows = db.execute("SELECT key, answer FROM answers").fetchall()
+    for key, answer in rows:
+        db.execute("INSERT OR REPLACE INTO answers VALUES (?, ?, ?)", (key, answer, 1.0))
+    db.close()
+    return len(rows)
+
+
+def test_a_fit_that_mixes_two_models_is_not_saved_as_one(tmp_path):
+    base = write(tmp_path, "base.txt", "\n".join(BASE[:12]) + "\n")
+    path = tmp_path / "mixed.json"
+    assert run(["x", base, "-k", "2"], model="typesafe/jev-1.13")[0] == 0        # twelve answers, cached under the alias
+    # The alias has moved. A higher -k replays those from the cache and asks the new model for the rest.
+    code, out, err, oracle = run(["x", base, "-k", "4", "--save-scale", str(path)], model="typesafe/jev-1.14")
+    assert code == 2 and not path.exists() and len(oracle.bodies) == 12
+    assert "typesafe/jev-1.13 (12)" in err and "typesafe/jev-1.14 (12)" in err and "--no-cache" in err
+    assert sorted(out.splitlines()) == sorted(BASE[:12])                           # the sort itself still prints
+
+    assert run(["x", base, "-k", "4", "--save-scale", str(path), "--no-cache"], model="typesafe/jev-1.14")[0] == 0
+    assert json.loads(path.read_text())["model"]["answered"] == {"typesafe/jev-1.14": 24}
+
+    forced = tmp_path / "forced.json"
+    code, _, err, _ = run(["x", base, "-k", "4", "--save-scale", str(forced), "--any-model"], model="typesafe/jev-1.14")
+    assert code == 0 and json.loads(forced.read_text())["model"]["answered"] == {"typesafe/jev-1.13": 12, "typesafe/jev-1.14": 12}
+    held = write(tmp_path, "held.txt", HELD[0] + "\n")
+    code, out, err, oracle = run(["--scale", str(forced), held])                 # and such a scale vouches for no model
+    assert (code, out, oracle.bodies) == (2, "", []) and "typesafe/jev-1.13" in err and "--any-model" in err
+    assert run(["--scale", str(forced), held, "--any-model"])[0] == 0
+
+
+def test_answers_that_do_not_say_who_gave_them_are_not_vouched_for(tmp_path):
+    base = write(tmp_path, "base.txt", "\n".join(BASE[:12]) + "\n")
+    path = tmp_path / "legacy.json"
+    assert run(["x", base])[0] == 0
+    asked = forget_who_answered(tmp_path)
+    code, _, err, oracle = run(["x", base, "--save-scale", str(path)])
+    assert code == 2 and not path.exists() and oracle.bodies == []
+    assert f"{asked} of the {asked} answers" in err and "--no-cache" in err and "--any-model" in err
+
+    code, _, _, _ = run(["x", base, "--save-scale", str(path), "--any-model"])
+    model = json.loads(path.read_text())["model"]
+    assert code == 0 and model["answered"] == {} and model["unknown_answers"] == asked
+    held = write(tmp_path, "held.txt", HELD[0] + "\n")
+    code, out, err, oracle = run(["--scale", str(path), held])
+    assert (code, out, oracle.bodies) == (2, "", []) and f"{asked} of the {asked} answers behind it do not say" in err
+    assert "--any-model" in err
+
+    # An API that never names its model leaves every answer unknown, cache or no cache.
+    code, _, err, _ = run(["x", base, "--save-scale", str(path), "--no-cache"], model=None)
+    assert code == 2 and "answers" in err and "--any-model" in err
+
+
+def test_a_cached_answer_from_another_model_is_caught_without_a_call(tmp_path, scale):
+    held = write(tmp_path, "held.txt", HELD[0] + "\n")
+    assert run(["--scale", scale, held, "--any-model"], model="typesafe/jev-1.14")[0] == 0     # cached, and the cache says by whom
+    code, out, err, oracle = run(["--scale", scale, held])
+    assert (code, out, oracle.bodies) == (2, "", [])
+    assert "typesafe/jev-1.13" in err and "typesafe/jev-1.14" in err and "cache" in err
+
+    forget_who_answered(tmp_path)                                  # the same answers, no longer saying who gave them
+    code, out, err, oracle = run(["--scale", scale, held, "-o"])
+    assert code == 0 and oracle.bodies == [] and out.count("\n") == 1
+    assert "10 of the 10 answers did not say which model gave them" in err

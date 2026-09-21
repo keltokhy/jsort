@@ -43,7 +43,8 @@ class Anchor:
 class Scale:
     description: str
     question: dict             # the question exactly as it was asked; placement asks it again verbatim
-    model: dict                # api, endpoint, requested and answered: what the cache keys on, and who replied
+    model: dict                # api, endpoint and requested, which the cache keys on; answered, a count of answers
+                               # by the model the API named; unknown_answers, those that came with no name
     input: dict                # max_chars, and the unit and field the texts were read as
     fit: dict                  # texts, comparisons, rounds, per_item, seed, reliability, lean, gamma, ridge
     anchors: tuple[Anchor, ...]   # highest first
@@ -57,6 +58,12 @@ class Scale:
     @property
     def max_chars(self) -> int:
         return int(self.input["max_chars"])
+
+    @property
+    def answered_by(self) -> str | None:
+        """The one model every answer behind the scale named. None when they named several, or some named none."""
+        named = self.model["answered"]
+        return next(iter(named)) if len(named) == 1 and not self.model["unknown_answers"] else None
 
     @property
     def span(self) -> tuple[float, float]:
@@ -119,8 +126,10 @@ class Scale:
         if not isinstance(model, dict) or not all(isinstance(model.get(k), str) and model[k]
                                                   for k in ("api", "endpoint", "requested")):
             raise ScaleError("the scale does not say which api, endpoint and model it was built with")
-        if model.get("answered") is not None and not isinstance(model["answered"], str):
-            raise ScaleError("the scale's answering model is not a model ID")
+        named = model.get("answered")
+        if (not isinstance(named, dict) or not all(isinstance(k, str) and k and _whole(v, 1) for k, v in named.items())
+                or not _whole(model.get("unknown_answers"), 0)):
+            raise ScaleError("the scale does not count its answers by the model that gave them")
         if not isinstance(inputs, dict) or not _whole(inputs.get("max_chars"), 1):
             raise ScaleError("the scale does not say how many characters of a text Jev was shown")
         if not isinstance(fitted, dict) or not _finite(fitted.get("gamma")):
@@ -142,28 +151,43 @@ class Scale:
                    created=data.get("created"), jsort_version=data.get("jsort_version"))
 
     def check_model(self, api: str, endpoint: str, requested: str) -> None:
-        """Refuse a client the cache would not treat as the one that built the scale.
+        """Refuse a client the cache would not treat as the one that built the scale, and a scale that vouches for no model.
 
         Scores from different models are not comparable, and neither are answers the cache keeps apart.
         Asking for the model that answered by its own ID is as good as asking for the alias that reached it.
         """
         built = self.model
+        if self.answered_by is None:
+            raise ScaleError(f"the scale cannot say which model it was built on: {_unvouched(built)}. Texts placed on it "
+                             "could not be checked against that model. Build the scale again from answers that name one "
+                             "model (--no-cache, or a pinned --model), or pass --any-model to place anyway")
         differs = [f"{what} {mine!r}, not {theirs!r}" for what, mine, theirs in (
             ("the API is", api, built["api"]), ("the endpoint is", endpoint, built["endpoint"])) if mine != theirs]
-        if requested not in (built["requested"], built.get("answered")):
+        if requested not in (built["requested"], self.answered_by):
             differs.append(f"the model is {requested!r}, not {built['requested']!r}")
         if differs:
             raise ScaleError(f"this run would not ask the model the scale was built with: {'; '.join(differs)}. "
                              "Scores from different models are not comparable. Match the scale with --api and "
                              "--model, or pass --any-model to place anyway")
 
-    def check_answered(self, answered: str) -> None:
-        """The same refusal once the API has said which model replied, which is how a moved alias shows."""
-        built = self.model.get("answered")
-        if built and answered and answered != built:
-            raise ScaleError(f"the scale was built on answers from {built}, and {answered} is answering now. Scores "
-                             f"from different models are not comparable. Pin it with --model {built}, or pass "
-                             "--any-model to place anyway")
+    def check_answer(self, answered: str | None, source: str) -> bool:
+        """Whether an answer can be vouched for. Raises when it names a model other than the scale's: a moved alias
+        shows this way, on the first live reply or on a cached answer that recorded who gave it."""
+        built = self.answered_by
+        if answered and built and answered != built:
+            where = "the cache holds an answer from" if source == "cache" else "the answers now come from"
+            raise ScaleError(f"the scale was built on answers from {built}, and {where} {answered}. Scores from different "
+                             f"models are not comparable. Pin it with --model {built}"
+                             + (" and --no-cache" if source == "cache" else "") + ", or pass --any-model to place anyway")
+        return bool(answered)
+
+
+def _unvouched(model: dict) -> str:
+    named, unknown = model["answered"], model["unknown_answers"]
+    if len(named) > 1:
+        return "its answers came from " + " and ".join(f"{m} ({n:,})" for m, n in sorted(named.items()))
+    return f"{unknown:,} of the {unknown + sum(named.values()):,} answers behind it does not say which model gave it" if unknown == 1 \
+        else f"{unknown:,} of the {unknown + sum(named.values()):,} answers behind it do not say which model gave them"
 
 
 def _finite(x) -> bool:
@@ -200,15 +224,24 @@ def choose(score, se, count: int) -> list[int]:
     return sorted(usable, key=lambda i: (-score[i], i))
 
 
-def identity(jev) -> dict:
-    """Who was asked, as the cache records it (endpoint and requested model), and who the API says replied."""
+def identity(jev, responders: dict) -> dict:
+    """Who was asked, as the cache records it (endpoint and requested model), and who gave the answers the fit
+    used: a count for each model the API named, and a count of answers that came with no name."""
     backend = getattr(jev, "backend", None)
     return {"api": getattr(backend, "name", None), "endpoint": getattr(jev, "url", None),
-            "requested": getattr(jev, "model", None), "answered": getattr(jev.meter, "model", "") or None}
+            "requested": getattr(jev, "model", None),
+            "answered": {m: n for m, n in sorted(responders.items(), key=lambda kv: str(kv[0])) if m},
+            "unknown_answers": sum(n for m, n in responders.items() if not m)}
 
 
-def build(ranking, anchors: int = DEFAULT_ANCHORS, *, unit: str | None = None, field: str | None = None) -> Scale:
-    """The scale a finished ranking defines. `unit` and `field` record how the texts were read."""
+def build(ranking, anchors: int = DEFAULT_ANCHORS, *, unit: str | None = None, field: str | None = None,
+          any_model: bool = False) -> Scale:
+    """The scale a finished ranking defines. `unit` and `field` record how the texts were read.
+
+    A scale names the model it was built on, and later placements are checked against that name, so it is not
+    saved on answers that named two models or on answers that named none, unless any_model says to. What the
+    file records is the count either way, never one name standing for answers that did not give it.
+    """
     from . import __version__
     from .model import RIDGE
 
@@ -217,6 +250,17 @@ def build(ranking, anchors: int = DEFAULT_ANCHORS, *, unit: str | None = None, f
     run = ranking.run
     if run is None:
         raise ScaleError("nothing was compared, so there is no scale to save")
+    named, unknown = run["model"]["answered"], run["model"]["unknown_answers"]
+    if len(named) > 1 and not any_model:
+        raise ScaleError("the fit mixes answers from " + " and ".join(f"{m} ({n:,})" for m, n in sorted(named.items()))
+                         + ": the model ID asked for reached different models at different times, and the cache "
+                         "kept the earlier answers. That is not one model's scale. Sort again with --no-cache or with "
+                         "--model pinned to one of them, or pass --any-model to save it as it is")
+    if unknown and not any_model:
+        raise ScaleError(f"{unknown:,} of the {unknown + sum(named.values()):,} answers in this fit did not say which "
+                         "model gave them (cache entries written before jsort recorded it, or an API that does not "
+                         "name its model), so the scale cannot name the model it was built on. Sort again with "
+                         "--no-cache, or pass --any-model to save it unverified; --scale will then need --any-model too")
     first: dict[str, int] = {}
     for i, text in enumerate(run["texts"]):   # identical texts share a score, so one of them stands for all
         if text.strip() and math.isfinite(ranking.score[i]) and math.isfinite(ranking.se[i]):

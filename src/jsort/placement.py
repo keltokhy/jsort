@@ -34,6 +34,7 @@ class Placement(Ranking):
     """A Ranking whose scores are on the saved scale. `lean` is the scale's and there is no reliability:
     that belongs to the run that fitted the scale."""
     beyond: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))   # +1 above every anchor, -1 below, else 0
+    unverified: int = 0            # answers that did not say which model gave them, so could not be checked against the scale's
 
 
 class _Purse:
@@ -109,7 +110,7 @@ class Placer:
         self.scores = np.array([a.score for a in scale.anchors])     # highest first, as the scale keeps them
         self.known = {a.text: a for a in scale.anchors}
         self.purse, self.sem = _Purse(budget), asyncio.Semaphore(concurrency)
-        self.asked = self.rounds = 0
+        self.asked = self.rounds = self.unverified = 0
         self.errors: list[str] = []
         self.fatal: str | None = None
 
@@ -129,9 +130,12 @@ class Placer:
                 return None
             try:
                 state = {"A": shown, "B": anchor} if leads else {"A": anchor, "B": shown}
-                answer = await self.jev.ask(state, {"q": self.scale.question}, on_cost=self.purse.charge)
-                if not self.any_model:
-                    self.scale.check_answered(self.jev.meter.model)
+                origin: dict = {}
+                answer = await self.jev.ask(state, {"q": self.scale.question}, on_cost=self.purse.charge, provenance=origin)
+                origin = origin.get("q") or {}
+                # Each answer is checked, the cached ones too: the cache keys on the ID asked for, not on who replied.
+                if not self.any_model and not self.scale.check_answer(origin.get("resolved_model"), origin.get("source", "api")):
+                    self.unverified += 1
                 return float(answer["q"]["noul"])
             except JevError as e:
                 self.errors.append(str(e))
@@ -232,7 +236,7 @@ def collect(results: list[tuple[float, float, int, int]], scale: Scale, placer: 
                     np.array(columns[2], dtype=int), lean=float(scale.fit.get("lean") or 0.0), gamma=scale.gamma,
                     beyond=np.array(columns[3], dtype=int))
     if placer is not None:
-        out.asked, out.rounds, out.errors = placer.asked, placer.rounds, placer.errors
+        out.asked, out.rounds, out.errors, out.unverified = placer.asked, placer.rounds, placer.errors, placer.unverified
         out.over_budget, out.fatal = placer.over_budget, placer.fatal
     return out
 
