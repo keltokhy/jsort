@@ -85,8 +85,6 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--scale", metavar="FILE",
                     help="place the input on the scale saved in FILE, which supplies the description. Each text is "
                          "compared with the scale's anchors only, so its score does not depend on the rest of the input")
-    ap.add_argument("--se-target", type=float, default=None, metavar="SE",
-                    help="with --scale, stop asking about a text once its standard error is this small")
     ap.add_argument("--unordered", action="store_true",
                     help="with --scale, print each text as soon as it is placed, not in input order")
     ap.add_argument("--any-model", action="store_true",
@@ -270,10 +268,8 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         (not (args.scale and args.save_scale), "--save-scale saves the scale a run fits, and a --scale run fits none"),
         (args.anchors is None or bool(args.save_scale), "--anchors goes with --save-scale"),
         (args.anchors is None or args.anchors >= 2, "--anchors takes 2 or more"),
-        (bool(args.scale) or not (args.se_target is not None or args.unordered), "--se-target and --unordered go with --scale"),
+        (bool(args.scale) or not args.unordered, "--unordered goes with --scale"),
         (bool(args.scale or args.save_scale) or not args.any_model, "--any-model goes with --scale or --save-scale"),
-        (args.se_target is None or (math.isfinite(args.se_target) and args.se_target > 0),
-         "--se-target must be finite and greater than 0"),
         (not (args.unordered and (args.keep_order or args.top)), "--unordered cannot be combined with --keep-order or --top"),
         (not args.save_scale or os.path.isdir(os.path.dirname(os.path.abspath(args.save_scale))),
          f"--save-scale: no directory to write {args.save_scale} in"),
@@ -332,7 +328,7 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
                 nonlocal jev
                 jev = client()
                 try:
-                    return await aplace(texts, scale, jev, per_item=args.per_item, se_target=args.se_target,
+                    return await aplace(texts, scale, jev, per_item=args.per_item,
                                         seed=args.seed, budget=args.budget, max_chars=args.max_chars,
                                         concurrency=args.concurrency, any_model=args.any_model, progress=progress)
                 finally:
@@ -529,7 +525,7 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
                 elif shown.strip():
                     if s["placer"] is None:     # the first text worth asking about is what needs a key
                         s["jev"] = s["jev"] or client()
-                        s["placer"] = Placer(scale, s["jev"], per_item=args.per_item, se_target=args.se_target,
+                        s["placer"] = Placer(scale, s["jev"], per_item=args.per_item,
                                              seed=args.seed, budget=args.budget, max_chars=args.max_chars,
                                              concurrency=args.concurrency, any_model=args.any_model)
                     result = await s["placer"].place(rec.text)

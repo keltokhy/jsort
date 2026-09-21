@@ -378,15 +378,18 @@ def test_texts_off_either_end_are_finite_and_flagged(tmp_path, scale):
     assert "2 texts fell beyond" in err
 
 
-def test_k_bounds_the_comparisons_and_an_se_target_stops_early(tmp_path, scale):
+def test_k_bounds_the_comparisons_and_nothing_stops_a_text_early(tmp_path, scale):
     held = write(tmp_path, "held.txt", "\n".join(HELD[:10]) + "\n")
     for k in (2, 7, 16):
         _, out, _, oracle = run(["--scale", scale, held, "--json", "-k", str(k), "--no-cache"])
         assert {o["comparisons"] for o in placed(out).values()} == {k} and len(oracle.bodies) == 10 * k
-    _, out, _, oracle = run(["--scale", scale, held, "--json", "--no-cache", "--se-target", "5"])
-    assert {o["comparisons"] for o in placed(out).values()} == {7}     # never before the second round, of 4 + 3 + 3
-    _, tight, _, _ = run(["--scale", scale, held, "--json", "--no-cache", "--se-target", "0.000001"])
-    assert {o["comparisons"] for o in placed(tight).values()} == {10}
+    # Stopping once the reported standard error looks small enough would select for small estimates of it:
+    # the option that did so is gone, from the command and from Python.
+    with pytest.raises(SystemExit) as unknown_option:
+        run(["--scale", scale, held, "--se-target", "0.3"])
+    assert unknown_option.value.code == 2
+    with pytest.raises(TypeError):
+        jsort.place(HELD[:2], scale, se_target=0.3, transport=httpx.MockTransport(Oracle()))
 
     # With five anchors a text can meet each twice at most, once in each position.
     few = str(tmp_path / "few.json")
@@ -513,7 +516,7 @@ def test_usage_errors(tmp_path, scale):
     f = write(tmp_path, "a.txt", "a v=1\nb v=2\n")
     for argv in (["--scale", scale, f, "--save-scale", str(tmp_path / "s.json")], ["x", f, "--anchors", "5"],
                  ["x", f, "--save-scale", str(tmp_path / "s.json"), "--anchors", "1"], ["x", f, "--unordered"],
-                 ["x", f, "--se-target", "0.2"], ["x", f, "--any-model"], ["--scale", scale, f, "--se-target", "0"],
+                 ["x", f, "--any-model"],
                  ["--scale", scale, f, "--unordered", "--keep-order"], ["--scale", scale, f, "--unordered", "--top", "2"],
                  ["--scale", scale, f, "--keep-order", "--top", "2"], ["x", f, "--seed", "-1"],
                  ["x", f, "--save-scale", str(tmp_path / "no" / "such" / "dir.json")], ["--scale", scale, "--whole"]):

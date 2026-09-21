@@ -3,7 +3,8 @@
 A text's score is the one-parameter version of the fit the scale came from (model.place). Which anchors
 it meets is chosen as a computerised adaptive test chooses items: a first round spread across the scale,
 then rounds of the anchors nearest the running estimate, where a comparison says the most. A round's
-questions go out together, so a text is placed in about three round trips.
+questions go out together, so a text is placed in about three round trips. Every text gets all -k of its
+comparisons; nothing stops on a standard error that looks small, which would select for small estimates of it.
 
 Nothing a text is asked depends on any other text in the input. Its random choices are drawn from a
 generator seeded with the seed and the text itself, so a text gets the same questions, and so the same
@@ -18,7 +19,7 @@ import json
 import math
 import os
 from dataclasses import dataclass, field
-from numbers import Integral, Real
+from numbers import Integral
 
 import numpy as np
 
@@ -144,17 +145,13 @@ class _Purse:
 class Placer:
     """One run's shared state: the scale, the client, the budget and what went wrong. `place` takes one text."""
 
-    def __init__(self, scale: Scale, jev: Jev, *, per_item: int = 10, se_target: float | None = None, seed: int = 0,
-                 budget: float | None = None, max_chars: int | None = None, concurrency: int = 32,
-                 any_model: bool = False):
+    def __init__(self, scale: Scale, jev: Jev, *, per_item: int = 10, seed: int = 0, budget: float | None = None,
+                 max_chars: int | None = None, concurrency: int = 32, any_model: bool = False):
         max_chars = scale.max_chars if max_chars is None else max_chars
         for name, value, minimum in (("per_item", per_item, 2), ("concurrency", concurrency, 1),
                                      ("max_chars", max_chars, 1), ("seed", seed, 0)):
             if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
                 raise ValueError(f"{name} must be an integer of at least {minimum}")
-        if se_target is not None and (isinstance(se_target, bool) or not isinstance(se_target, Real)
-                                      or not math.isfinite(se_target) or se_target <= 0):
-            raise ValueError("se_target must be finite and greater than 0")
         if budget is None:
             budget = float(os.environ.get("JSORT_BUDGET") or 1.0)
         if not math.isfinite(budget) or budget < 0:
@@ -162,7 +159,7 @@ class Placer:
         if not any_model:
             scale.check_model(jev.backend.name, jev.url, jev.model)
         self.scale, self.jev, self.any_model = scale, jev, any_model
-        self.per_item, self.se_target, self.seed, self.max_chars = int(per_item), se_target, int(seed), int(max_chars)
+        self.per_item, self.seed, self.max_chars = int(per_item), int(seed), int(max_chars)
         self.scores = np.array([a.score for a in scale.anchors])     # highest first, as the scale keeps them
         self.known = {a.text: a for a in scale.anchors}
         self.purse, self.sem = _Purse(budget, concurrency), asyncio.Semaphore(concurrency)
@@ -283,10 +280,6 @@ class Placer:
             if self.fatal or (self.purse.over and len(answers) > sum(y is not None for y in answers)):
                 planned += sum(sizes[r + 1:])          # cut short: the rounds that will not be asked were planned too
                 break
-            # The first round's answers are mostly lopsided and few, so its standard error is not one to stop on.
-            if self.se_target is not None and r >= 1 and ys and se <= self.se_target:
-                planned = len(ys)
-                break
         if not ys:
             return math.nan, math.nan, 0, 0, False
         low, high = self.scale.span
@@ -297,11 +290,12 @@ async def aplace(texts: list[str], scale: Scale | str | os.PathLike, jev: Jev, *
                  progress=None, **options) -> Placement:
     """Place texts on a saved scale, given a Scale or the path of one.
 
-    per_item bounds the comparisons each text gets, all of them with anchors; se_target stops a text
-    early, after its second round at the soonest, once its standard error is that small. max_chars
-    defaults to the scale's. A scale built with another API, endpoint or model raises ScaleError unless
-    any_model is set. budget is as in arank. Blank texts get no score; an anchor's own text gets the
-    score the scale gave it.
+    per_item is the comparisons each text gets, all of them with anchors. Every text gets them all: there is
+    no stopping once a standard error looks small, because a rule that stops on the reported error selects for
+    small estimates of it. max_chars defaults to the scale's. A scale that cannot name one model, or that was
+    built with another API, endpoint or model, raises ScaleError unless any_model is set. budget is the
+    dollars the run may spend: a text is placed in full or not at all, and `partial` marks one cut short.
+    Blank texts get no score; an anchor's own text gets the score the scale gave it.
     """
     if not isinstance(scale, Scale):
         scale = Scale.load(scale)
