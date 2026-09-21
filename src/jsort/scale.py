@@ -123,7 +123,7 @@ class Scale:
         if not isinstance(data, dict) or "schema_version" not in data:
             raise ScaleError("not a scale file: no schema_version")
         version = data["schema_version"]
-        if version != SCHEMA_VERSION:
+        if not _whole(version, 1) or version != SCHEMA_VERSION:
             raise ScaleError(f"scale schema {version!r} is not one this jsort reads (it reads {SCHEMA_VERSION}); "
                              "upgrade jsort or save the scale again")
         description = data.get("description")
@@ -233,7 +233,7 @@ def _whole(x, minimum: int) -> bool:
 
 
 def choose(score, se, count: int) -> list[int]:
-    """Which texts to keep as anchors, highest first: spread over the score range, the best measured of each stretch.
+    """Which texts to keep as anchors, highest first: spread over the range, preferring the smallest reported errors.
 
     The highest and the lowest text are always kept, so the anchors span everything the scale was fitted
     on and "beyond the anchors" means beyond all of it. Between them the range is cut into `count`

@@ -79,7 +79,8 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=0, metavar="N",
                     help="seed for the choice of pairs (default 0); the same seed asks the same questions, so a rerun is cached")
     ap.add_argument("--save-scale", metavar="FILE",
-                    help="also write the fitted scale to FILE: the description, the model, and anchors with their scores")
+                    help="also write the fitted scale to FILE: the description, the model, and anchor texts stored "
+                         "verbatim as shown to Jev, with their scores")
     ap.add_argument("--anchors", type=int, default=None, metavar="N",
                     help=f"with --save-scale, how many texts to keep as anchors (default {DEFAULT_ANCHORS})")
     ap.add_argument("--scale", metavar="FILE",
@@ -116,7 +117,7 @@ class Writer:
 
     def __init__(self, args, out, placing: bool = False):
         self.args, self.out, self.placing = args, out, placing
-        # A placed text also says whether it fell beyond the scale's anchors, where its score is an extrapolation,
+        # A placed text also says whether it fell beyond the scale's anchors, where its score is best read as a bound,
         # and whether it was placed on fewer comparisons than planned, where it is not the score a full placement gives.
         self.fields = [f"{args.name}_{s}" for s in ("score", "se", "n") + (("beyond", "partial") if placing else ())]
         self.header: list[str] | None = None
@@ -134,7 +135,8 @@ class Writer:
     def text(self, rec: Record, rank: int | None, score: float, se: float, n: int, beyond: int = 0,
              partial: bool = False) -> None:
         args, unscored = self.args, math.isnan(score)
-        s = dict(zip(self.fields, (None if unscored else round(float(score), 4), None if unscored else round(float(se), 4),
+        s = dict(zip(self.fields, (None if unscored else round(float(score), 4),
+                                   None if unscored or (self.placing and math.isnan(se)) else round(float(se), 4),
                                    int(n), {1: "above", -1: "below"}.get(int(beyond)), None if unscored else bool(partial))))
         if args.json:
             obj = {"rank": rank, "score": s[self.fields[0]], "se": s[self.fields[1]], "comparisons": s[self.fields[2]]}
@@ -213,7 +215,7 @@ def closing_notes(args, scale: Scale | None, *, truncated: int, ragged: int, ove
     if sum(beyond):
         low, high = scale.span
         print(f"jsort: {sum(beyond):,} texts fell beyond the scale's anchors ({beyond[0]:,} above {_number(high, 2)}, "
-              f"{beyond[1]:,} below {_number(low, 2)}); their scores are extrapolations", file=err)
+              f"{beyond[1]:,} below {_number(low, 2)}); their scores are best read as bounds toward the scale", file=err)
 
 
 def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -> int:
@@ -227,6 +229,12 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         except ScaleError as e:
             print(f"jsort: {e}", file=err)
             return 2
+        incomplete = ["over budget"] if scale.fit["over_budget"] else []
+        if scale.fit["failed"]:
+            incomplete.append(f"{scale.fit['failed']:,} failed comparisons")
+        if incomplete:
+            print(f"jsort: {args.scale} was saved from an incomplete fit ({'; '.join(incomplete)}); "
+                  "its anchors may be less well measured. For a complete fit, rebuild the scale", file=err)
         description, files = scale.description, list(args.args)
         if files and files[0] == description:
             files = files[1:]
@@ -378,7 +386,7 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     verb = "placed" if placing else "sorted"
     if ranking.fatal:
         print(f"jsort: {ranking.fatal}", file=err)
-        if not ranking.asked:
+        if not ranking.asked or (placing and ranking.model_refused):
             return 2
         # Answers that were paid for before the API refused are still worth a sort.
         print(f"jsort: {verb} on the {ranking.asked:,} comparisons answered before that", file=err)
@@ -507,7 +515,7 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
                     low, high = scale.span
                     print(f"jsort: {rec.file}:{rec.lineno}: " + (f"above every anchor (the highest is {_number(high, 2)})"
                           if beyond > 0 else f"below every anchor (the lowest is {_number(low, 2)})")
-                          + f"; its score of {_number(score, 2)} is an extrapolation", file=err)
+                          + f"; its score of {_number(score, 2)} is best read as a bound toward the scale", file=err)
             try:
                 writer.text(rec, None, score, se, n, beyond, partial)
                 out.flush()

@@ -1,8 +1,10 @@
 """The scale itself: fitting, standard errors and the diagnostics. No network."""
 
 import itertools
+import math
 
 import numpy as np
+import pytest
 
 from jsort.model import Fit, fit, information, place, reliability, shortfall, standard_errors
 
@@ -150,3 +152,11 @@ def test_a_text_beyond_every_anchor_is_placed_finitely():
     below, _ = place(anchors, leads, np.where(leads, 0.0, 1.0), -0.1)
     assert np.isfinite([above, below, se]).all() and 3 < above < 15 and -15 < below < -3
     assert all(np.isnan(place([], [], [], 0.0)))
+
+
+def test_placed_standard_error_corrects_for_leverage():
+    # Three equally informative comparisons, balanced around p=0.5: the optimum is exactly zero.
+    # HC3 divides the residual norm by information minus one comparison's weight; HC0 omits that weight.
+    score, se = place([0, 0, 0], [True, True, True], [0.15, 0.5, 0.85], 0, ridge=0.01)
+    assert score == pytest.approx(0, abs=1e-12)
+    assert se == pytest.approx(math.sqrt(2 * 0.35 ** 2) / (0.76 - 0.25))

@@ -120,7 +120,7 @@ def test_saving_writes_what_was_asked_of_whom_and_anchors_across_the_range(tmp_p
     assert code == 0 and len(json.loads(open(tmp_path / "few.json").read())["anchors"]) == 8
 
 
-def test_anchor_choice_prefers_well_measured_texts_and_keeps_both_ends():
+def test_anchor_choice_prefers_small_reported_errors_and_keeps_both_ends():
     score = [0.0, 0.1, 0.2, 5.0, 5.1, 9.9, 10.0, 4.9]
     se = [0.9, 0.1, 0.5, 0.2, 0.1, 0.1, 0.8, 0.7]
     assert choose(score, se, 4) == [6, 4, 7, 0]          # one from each quarter: both ends whatever their errors, else the smallest
@@ -267,10 +267,14 @@ def test_keep_order_holds_the_input_order_and_unordered_does_not(tmp_path, scale
 
 def test_ordered_streaming_bounds_the_texts_in_hand(tmp_path, scale):
     started, in_hand = set(), []
+    first_calls = 0
 
     async def slow_first(body):
+        nonlocal first_calls
         started.add(next(t for t in body["state"].values() if t.startswith("later")))
-        if HELD[0] in body["state"].values() and not in_hand:
+        first_calls += HELD[0] in body["state"].values()
+        if HELD[0] in body["state"].values() and first_calls > 1 and not in_hand:
+            # Let the identity probe finish first, then hold the first text while its neighbours can finish.
             in_hand.append(0)
             await asyncio.sleep(0.1)                         # long enough for the rest to run ahead, were they allowed to
             in_hand[0] = len(started)
@@ -368,10 +372,11 @@ def test_texts_off_either_end_are_finite_and_flagged(tmp_path, scale):
     got = [json.loads(l) for l in out.splitlines()]
     low, high = Scale.load(scale).span
     assert code == 0 and [g["beyond"] for g in got] == ["above", None, "below"]
-    assert all(math.isfinite(g["score"]) and math.isfinite(g["se"]) for g in got)
+    assert all(math.isfinite(g["score"]) for g in got)
+    assert got[0]["se"] is None and got[2]["se"] is None and math.isfinite(got[1]["se"])
     assert high < got[0]["score"] < high + 10 and low - 10 < got[2]["score"] < low
     assert f"{held}:1: above every anchor" in err and f"{held}:3: below every anchor" in err
-    assert "2 texts fell beyond the scale's anchors (1 above" in err and "extrapolations" in err
+    assert "2 texts fell beyond the scale's anchors (1 above" in err and "bounds toward the scale" in err
 
     _, out, err, _ = run(["--scale", scale, held, "-o"], quirk=0.0)       # plain columns stay numeric; stderr says which
     assert [float(l.split("\t")[0]) for l in out.splitlines()] == sorted((round(g["score"], 2) for g in got), reverse=True)
@@ -818,3 +823,151 @@ def test_a_stand_in_judge_can_sort_save_and_place():
             assert p.asked == 50 and not np.isnan(p.score).any() and not p.partial.any()
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("extra", [[], ["--keep-order"], ["--unordered"]])
+@pytest.mark.parametrize("budget", ["0", "1"])
+def test_a_moved_alias_sends_one_probe_and_a_cached_rerun_prints_nothing(tmp_path, scale, extra, budget):
+    async def delay(body):
+        await asyncio.sleep(0.002)       # a concurrent wave can start before the first answer arrives
+
+    held = write(tmp_path, "held.txt", "\n".join(HELD[:40]) + "\n")
+    argv = ["--scale", scale, held, "--json", "--budget", budget, "-j", "32", *extra]
+    code, out, err, oracle = run(argv, model="typesafe/jev-1.14", gate=delay)
+    assert (code, out) == (2, "") and "answers now come from typesafe/jev-1.14" in err
+    assert len(oracle.bodies) == 1
+    code, out, err, oracle = run(argv, model="typesafe/jev-1.14", gate=delay)
+    assert (code, out, oracle.bodies) == (2, "", []) and "cache holds an answer from" in err
+
+
+def test_cached_matching_answers_do_not_confirm_the_first_live_model(tmp_path, scale):
+    # A completed placement is cached from the old model. The first uncached answer must still go alone.
+    one = write(tmp_path, "one.txt", HELD[0] + "\n")
+    assert run(["--scale", scale, one])[0] == 0
+
+    async def delay(body):
+        await asyncio.sleep(0.002)
+
+    held = write(tmp_path, "held.txt", "\n".join(HELD[:20]) + "\n")
+    for width in ("1", "32"):
+        code, out, err, oracle = run(["--scale", scale, held, "--json", "--budget", "0", "-j", width],
+                                    model="typesafe/jev-1.14", gate=delay)
+        assert code == 2 and out == "" and "typesafe/jev-1.14" in err
+        assert len(oracle.bodies) == (1 if width == "1" else 0)
+
+
+@pytest.mark.parametrize("extra", [[], ["--keep-order"], ["--unordered"]])
+@pytest.mark.parametrize("reason", ["far", "few", "failed"])
+def test_unreliable_placed_errors_are_empty_in_every_format(tmp_path, scale, extra, reason):
+    text = "outside v=99" if reason == "far" else HELD[0]
+    k = "2" if reason == "few" else "3" if reason == "failed" else "10"
+    for format_ in ("plain", "json", "csv", "jsonl"):
+        failed = []
+
+        async def fail_once(body):
+            if reason == "failed" and not failed:
+                failed.append(1)
+                raise httpx.ConnectError("scripted failure")
+
+        data = "note\n" + text + "\n" if format_ == "csv" else json.dumps({"note": text}) + "\n" if format_ == "jsonl" else text + "\n"
+        source = write(tmp_path, "input.txt", data)
+        flags = ["--" + format_, "--field", "note", "-o"] if format_ in ("csv", "jsonl") else ["--json"] if format_ == "json" else ["-o"]
+        code, out, err, _ = run(["--scale", scale, source, "-k", k, "--no-cache", "--timeout", "0.01", *flags, *extra], gate=fail_once)
+        assert code == (2 if reason == "failed" else 0), err
+        if format_ == "plain":
+            score, se, _ = out.rstrip("\n").split("\t")
+            assert math.isfinite(float(score)) and se == ""
+        else:
+            row = next(csv.DictReader(io.StringIO(out))) if format_ == "csv" else json.loads(out)
+            prefix = "" if format_ == "json" else "jsort_"
+            assert math.isfinite(float(row[prefix + "score"]))
+            assert row[prefix + "se"] == ("" if format_ == "csv" else None)
+            assert row[prefix + "beyond"] == ("above" if reason == "far" else "" if format_ == "csv" else None)
+
+
+@pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.parametrize("margin", [1.99, 2.0, 2.01])
+def test_placed_error_is_suppressed_only_more_than_two_logits_beyond(scale, monkeypatch, sign, margin):
+    low, high = Scale.load(scale).span
+    score = (high if sign > 0 else low) + sign * margin
+    monkeypatch.setattr("jsort.placement.locate", lambda *a, **kw: (score, 0.4))
+    result = jsort.place([HELD[0]], scale, cache=False, transport=httpx.MockTransport(Oracle()))
+    assert result.score[0] == score and result.beyond[0] == sign
+    assert np.isnan(result.se[0]) if margin > 2 else result.se[0] == 0.4
+
+
+@pytest.mark.parametrize("extra", [[], ["--keep-order"], ["--unordered"]])
+@pytest.mark.parametrize("over_budget,failed", [(True, 0), (False, 2), (True, 2), (False, 0)])
+def test_loading_an_incomplete_scale_warns_and_still_places(tmp_path, scale, extra, over_budget, failed):
+    data = json.loads(open(scale).read())
+    data["fit"].update(over_budget=over_budget, failed=failed)
+    path = write(tmp_path, "incomplete.json", json.dumps(data))
+    held = write(tmp_path, "held.txt", HELD[0] + "\n")
+    code, out, err, _ = run(["--scale", path, held, "--json", *extra])
+    assert code == 0 and placed(out)[HELD[0]]["score"] is not None
+    assert ("saved from an incomplete fit" in err) == bool(over_budget or failed)
+    if over_budget or failed:
+        assert path in err and "rebuild" in err
+        assert ("over budget" in err) == over_budget
+        assert ("2 failed comparisons" in err) == bool(failed)
+
+
+@pytest.mark.parametrize("version", [True, 1.0, "1"])
+def test_schema_version_is_an_integer(tmp_path, scale, version):
+    data = json.loads(open(scale).read())
+    data["schema_version"] = version
+    with pytest.raises(ScaleError, match="schema"):
+        Scale.from_json(data)
+
+
+def test_placer_uses_the_saved_lean(tmp_path, scale):
+    data = json.loads(open(scale).read())
+    gamma, target = 1.8, 0.7
+    data["fit"].update(gamma=gamma, lean=1 / (1 + math.exp(-gamma)) - 0.5)
+    saved = Scale.from_json(data)
+    values = {a.text: a.score for a in saved.anchors} | {"new text": target}
+
+    async def exact(request):
+        body = json.loads(request.content)
+        state = body["state"]
+        p = 1 / (1 + math.exp(-(values[state["A"]] - values[state["B"]] + gamma)))
+        return httpx.Response(200, json={"model": saved.answered_by, "answers": {"q": {"type": "noul", "noul": p}}})
+
+    result = jsort.place(["new text"], saved, per_item=3, cache=False, transport=httpx.MockTransport(exact))
+    assert result.comparisons[0] == 3 and abs(result.score[0] - target) < 0.04
+
+
+@pytest.mark.parametrize("extra", [[], ["--keep-order"], ["--unordered"]])
+@pytest.mark.parametrize("width", ["1", "8"])
+def test_duplicate_shown_texts_share_one_placement_without_a_cache(tmp_path, scale, extra, width):
+    class Jitter(Oracle):
+        async def __call__(self, request):
+            response = await super().__call__(request)
+            payload = response.json()
+            p = payload["answers"]["q"]["noul"]
+            payload["answers"]["q"]["noul"] = 1 / (1 + math.exp(-(math.log(p / (1 - p)) + 0.05 * len(self.bodies))))
+            await asyncio.sleep(0.001)
+            return httpx.Response(200, json=payload)
+
+    text = HELD[0]
+    held = write(tmp_path, "copies.txt", "\n".join(text + f" unseen suffix {i}" for i in range(6)) + "\n")
+    code, out, err, oracle = run(["--scale", scale, held, "--json", "--no-cache", "--budget", "0", "-j", width,
+                                "--max-chars", str(len(text)), *extra], oracle=Jitter())
+    rows = list(map(json.loads, out.splitlines()))
+    assert code == 0 and len(rows) == 6, err
+    assert len(oracle.bodies) == 10
+    assert len({(r["score"], r["se"], r["comparisons"], r["beyond"], r["partial"]) for r in rows}) == 1
+
+
+def test_zero_cost_replies_release_the_first_request_gate(scale):
+    flying, peak = 0, 0
+
+    async def delay(body):
+        nonlocal flying, peak
+        flying += 1
+        peak = max(peak, flying)
+        await asyncio.sleep(0.002)
+        flying -= 1
+
+    result = jsort.place(HELD[:8], scale, cache=False, concurrency=8, transport=httpx.MockTransport(Oracle(cost=0, gate=delay)))
+    assert result.asked == 80 and peak > 1

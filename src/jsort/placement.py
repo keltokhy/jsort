@@ -29,6 +29,7 @@ from .model import place as locate
 from .scale import Scale, ScaleError
 
 ROUNDS = 3   # one spread across the scale and two near the estimate: the round trips a text waits for
+SE_MARGIN = 2.0   # logits past an end anchor: saturation makes the reported error misleading
 
 
 @dataclass
@@ -38,6 +39,7 @@ class Placement(Ranking):
     beyond: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))   # +1 above every anchor, -1 below, else 0
     unverified: int = 0            # answers that did not say which model gave them, so could not be checked against the scale's
     partial: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))   # placed on fewer comparisons than were planned
+    model_refused: bool = False    # none of a batch's scores may print after a model mismatch
 
 
 def _tokens(model: str, state: dict, question: dict) -> int:
@@ -169,6 +171,8 @@ class Placer:
         self.asked = self.rounds = self.unverified = 0
         self.errors: list[str] = []
         self.fatal: str | None = None
+        self.probed = self.model_refused = False
+        self.placed: dict[bytes, asyncio.Future] = {}   # one result per shown text, even without the answer cache
 
     @property
     def over_budget(self) -> bool:
@@ -195,26 +199,36 @@ class Placer:
         async with self.sem:
             if self.fatal:
                 return None
-            try:
-                origin: dict = {}
-                answer = None
-                if self.purse.budget and not self.purse.rate:
-                    async with self.purse.probe:        # until a charge has been seen, one request at a time
-                        if not self.purse.rate:
-                            answer = await self._ask(state, tokens, origin)
-                if answer is None:                      # priced only now, by what the probe cost, not when it queued
-                    answer = await self._ask(state, tokens, origin)
-                if answer is None:
-                    return None
-                origin = origin.get("q") or {}
-                # Each answer is checked, the cached ones too: the cache keys on the ID asked for, not on who replied.
-                if not self.any_model and not self.scale.check_answer(origin.get("resolved_model"), origin.get("source", "api")):
-                    self.unverified += 1
-                return float(answer["q"]["noul"])
-            except JevError as e:
-                self.errors.append(str(e))
-            except (JevFatal, ScaleError) as e:
-                self.fatal = self.fatal or str(e)
+            if not self.probed:
+                async with self.purse.probe:
+                    if self.fatal:
+                        return None
+                    if not self.probed:
+                        # Check identity before releasing the lock. A cached answer cannot confirm today's alias,
+                        # and a zero-cost reply can; the first live request goes alone even with --budget 0.
+                        return await self._answer(state, tokens)
+            return await self._answer(state, tokens)
+
+    async def _answer(self, state: dict, tokens: int) -> float | None:
+        try:
+            origin: dict = {}
+            answer = await self._ask(state, tokens, origin)
+            if answer is None:
+                return None
+            origin = origin.get("q") or {}
+            verified = bool(origin.get("resolved_model"))
+            # Each answer is checked, the cached ones too: the cache keys on the ID asked for, not on who replied.
+            if not self.any_model:
+                verified = self.scale.check_answer(origin.get("resolved_model"), origin.get("source", "api"))
+                self.unverified += not verified
+            if origin.get("source", "api") == "api" and (verified or self.any_model):
+                self.probed = True
+            return float(answer["q"]["noul"])
+        except JevError as e:
+            self.errors.append(str(e))
+        except (JevFatal, ScaleError) as e:
+            self.model_refused |= isinstance(e, ScaleError)
+            self.fatal = self.fatal or str(e)
         return None
 
     def _spread(self, size: int, rng: np.random.Generator) -> list[int]:
@@ -232,21 +246,32 @@ class Placer:
         """(score, standard error, comparisons, beyond, partial) for one text. An unplaced text has a score of nan."""
         nowhere = (math.nan, math.nan, 0, 0, False)
         shown = text[:self.max_chars]
-        if not shown.strip() or self.halted:
+        if not shown.strip():
             return nowhere
         if shown in self.known:    # an anchor is where the scale says it is, and comparing a text with itself says nothing
             anchor = self.known[shown]
             return anchor.score, anchor.se, anchor.comparisons, 0, False
-
-        # Room for every comparison the text may ask for, each priced as if it met the longest anchor.
-        reserve = self.planned * _tokens(self.model, self._state(shown, self.longest, True), self.scale.question)
-        admitted_at = await self.purse.admit(reserve, lambda: self.halted)
-        if admitted_at is None:
+        digest = hashlib.sha256(shown.encode("utf-8", "surrogatepass")).digest()
+        if digest in self.placed:
+            return await asyncio.shield(self.placed[digest])
+        if self.halted:
             return nowhere
+        result = self.placed[digest] = asyncio.get_running_loop().create_future()
         try:
-            return await self._place(shown)
+            # Room for every comparison the text may ask for, each priced as if it met the longest anchor.
+            reserve = self.planned * _tokens(self.model, self._state(shown, self.longest, True), self.scale.question)
+            admitted_at = await self.purse.admit(reserve, lambda: self.halted)
+            if admitted_at is None:
+                result.set_result(nowhere)
+            else:
+                try:
+                    result.set_result(await self._place(shown))
+                finally:
+                    await self.purse.leave(reserve, admitted_at)
+            return result.result()
         finally:
-            await self.purse.leave(reserve, admitted_at)
+            if not result.done():
+                result.cancel()       # wake any duplicate waiting on a cancelled placement
 
     async def _place(self, shown: str) -> tuple[float, float, int, int, bool]:
         digest = hashlib.sha256(shown.encode("utf-8", "surrogatepass")).digest()
@@ -284,6 +309,8 @@ class Placer:
         if not ys:
             return math.nan, math.nan, 0, 0, False
         low, high = self.scale.span
+        if len(ys) < 3 or estimate < low - SE_MARGIN or estimate > high + SE_MARGIN:
+            se = math.nan
         return estimate, se, len(ys), int(estimate > high) - int(estimate < low), len(ys) < min(planned, self.planned)
 
 
@@ -297,6 +324,8 @@ async def aplace(texts: list[str], scale: Scale | str | os.PathLike, jev: Jev, *
     built with another API, endpoint or model, raises ScaleError unless any_model is set. budget is the
     dollars the run may spend: a text is placed in full or not at all, and `partial` marks one cut short.
     Blank texts get no score; an anchor's own text gets the score the scale gave it.
+    Repeated shown texts share one result within the run. A new text's se is nan below three successful
+    comparisons or more than two logits past an end anchor, where it would suggest misleading precision.
     """
     if not isinstance(scale, Scale):
         scale = Scale.load(scale)
@@ -326,6 +355,7 @@ def collect(results: list[tuple[float, float, int, int, bool]], scale: Scale, pl
     if placer is not None:
         out.asked, out.rounds, out.errors, out.unverified = placer.asked, placer.rounds, placer.errors, placer.unverified
         out.over_budget, out.fatal = placer.over_budget, placer.fatal
+        out.model_refused = placer.model_refused
     return out
 
 
