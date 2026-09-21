@@ -75,3 +75,48 @@ def test_a_billed_invalid_answer_still_reports_its_charge():
             await jev.close()
     asyncio.run(go())
     assert charges == [0.01]
+
+
+def test_who_answered_is_kept_beside_the_answers_and_older_tools_are_undisturbed(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "answers.sqlite"
+    legacy = sqlite3.connect(path, isolation_level=None)          # a cache as jsort 0.1.3 and jgrep create and fill it
+    legacy.execute("CREATE TABLE IF NOT EXISTS answers "
+                   "(key TEXT PRIMARY KEY, answer TEXT NOT NULL, at REAL NOT NULL) WITHOUT ROWID")
+    state, q = {"A": "old a", "B": "old b"}, question("higher")
+    old_key = Cache.key("jev-latest", state, q, endpoint="https://gateway.example/decisions")
+    legacy.execute("INSERT OR REPLACE INTO answers VALUES (?, ?, ?)", (old_key, '{"noul": 0.25}', 5.0))
+
+    async def fake(request):
+        return httpx.Response(200, json={"model": "jev-1.13", "answers": {"q": {"noul": 0.75}}, "usage": {"cost": 0.01}})
+
+    async def go():
+        backend = Backend("gateway", "https://gateway.example/decisions", "jev-latest", "UNUSED")
+        jev = Jev("test-key", backend, cache=Cache(path), transport=httpx.MockTransport(fake))
+        try:
+            old, new, again = {}, {}, {}
+            assert (await jev.ask(state, {"q": q}, provenance=old))["q"] == {"noul": 0.25}
+            assert old["q"]["source"] == "cache" and old["q"].get("resolved_model") is None   # unknown stays unknown
+            fresh = {"A": "new a", "B": "new b"}
+            assert (await jev.ask(fresh, {"q": q}, provenance=new))["q"] == {"noul": 0.75}
+            assert (new["q"]["source"], new["q"]["resolved_model"], new["q"]["provider"]) == ("api", "jev-1.13", "gateway")
+            assert (await jev.ask(fresh, {"q": q}, provenance=again))["q"] == {"noul": 0.75}
+            assert (again["q"]["source"], again["q"]["resolved_model"]) == ("cache", "jev-1.13") and jev.meter.calls == 1
+            return Cache.key("jev-latest", fresh, q, endpoint="https://gateway.example/decisions")
+        finally:
+            await jev.close()
+            jev.cache.db.close()
+
+    new_key = asyncio.run(go())
+    # The table older tools read is as it was: same three columns, and the new answer is there for them.
+    assert [row[1] for row in legacy.execute("PRAGMA table_info(answers)")] == ["key", "answer", "at"]
+    assert legacy.execute("SELECT answer FROM answers WHERE key = ?", (new_key,)).fetchone() == ('{"noul": 0.75}',)
+    # An older tool overwrites that answer. What was recorded about the old one must not be read as the new one's.
+    legacy.execute("INSERT OR REPLACE INTO answers VALUES (?, ?, ?)", (new_key, '{"noul": 0.5}', 9.0))
+    legacy.close()
+    cache = Cache(path)
+    try:
+        assert cache.get(new_key) == {"noul": 0.5} and cache.get_entry(new_key) == ({"noul": 0.5}, {})
+    finally:
+        cache.db.close()

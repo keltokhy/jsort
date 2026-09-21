@@ -107,7 +107,13 @@ def resolve_backend(name: str | None = None) -> tuple[Backend, str]:
 
 
 class Cache:
-    """Answers on disk, keyed on the endpoint, exact model, state and question."""
+    """Answers on disk, keyed on the endpoint, exact model, state and question.
+
+    The file is shared with jgrep, jlink and jcol, so the `answers` table and its keys never change. Who gave
+    an answer is kept beside it, in the `answer_metadata` table jlink introduced: joined on the key and on the
+    time the answer was written, so an answer an older tool has since overwritten does not inherit what was
+    recorded about the one before. An answer with no such row is simply of unknown origin.
+    """
 
     def __init__(self, path: Path | None = None):
         path = path or cache_path()
@@ -118,6 +124,8 @@ class Cache:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS answers "
                         "(key TEXT PRIMARY KEY, answer TEXT NOT NULL, at REAL NOT NULL) WITHOUT ROWID")
+        self.db.execute("CREATE TABLE IF NOT EXISTS answer_metadata "
+                        "(key TEXT PRIMARY KEY, at REAL NOT NULL, metadata TEXT NOT NULL) WITHOUT ROWID")
 
     @staticmethod
     def key(model: str, state, question: dict, *, endpoint: str) -> str:
@@ -128,8 +136,25 @@ class Cache:
         row = self.db.execute("SELECT answer FROM answers WHERE key = ?", (key,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def put(self, key: str, answer: dict) -> None:
-        self.db.execute("INSERT OR REPLACE INTO answers VALUES (?, ?, ?)", (key, json.dumps(answer), time.time()))
+    def get_entry(self, key: str) -> tuple[dict, dict] | None:
+        """An answer and what was recorded about who gave it; {} for an answer that does not say."""
+        row = self.db.execute("SELECT a.answer, m.metadata FROM answers a LEFT JOIN answer_metadata m "
+                              "ON a.key = m.key AND a.at = m.at WHERE a.key = ?", (key,)).fetchone()
+        return (json.loads(row[0]), json.loads(row[1]) if row[1] else {}) if row else None
+
+    def put(self, key: str, answer: dict, *, metadata: dict | None = None) -> None:
+        at = time.time()
+        self.db.execute("BEGIN IMMEDIATE")      # the answer and who gave it are written together or not at all
+        try:
+            self.db.execute("INSERT OR REPLACE INTO answers VALUES (?, ?, ?)", (key, json.dumps(answer), at))
+            if metadata is not None:
+                self.db.execute("INSERT OR REPLACE INTO answer_metadata VALUES (?, ?, ?)", (key, at, json.dumps(metadata)))
+            else:
+                self.db.execute("DELETE FROM answer_metadata WHERE key = ?", (key,))
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
 
 
 @dataclass
@@ -172,19 +197,23 @@ class Jev:
     async def close(self) -> None:
         await self.http.aclose()
 
-    async def ask(self, state, questions: dict[str, dict], *, on_cost=None) -> dict[str, dict]:
+    async def ask(self, state, questions: dict[str, dict], *, on_cost=None, provenance: dict | None = None) -> dict[str, dict]:
         """Answer every question about one state. Only questions missing from the cache are sent.
 
         on_cost receives charges for requests started by this call; cached and shared answers are free.
+        provenance, if given, receives for each question who answered it: `resolved_model` is the model
+        the API named, or None where that was never recorded, and `source` is api, cache or shared.
         """
         keys = {qid: Cache.key(self.model, state, q, endpoint=self.url) for qid, q in questions.items()}
-        answers = {}
+        answers, origins = {}, {}
         if self.cache:
             for qid, k in keys.items():
-                if (hit := self.cache.get(k)) is not None:
-                    _validate_answer(qid, questions[qid], hit)
-                    answers[qid] = hit
+                if (hit := self.cache.get_entry(k)) is not None:
+                    _validate_answer(qid, questions[qid], hit[0])
+                    answers[qid], origins[qid] = hit[0], hit[1] | {"source": "cache"}
         misses = {qid: q for qid, q in questions.items() if qid not in answers}
+        if provenance is not None:
+            provenance.update(origins)
         if not misses:
             self.meter.cached += 1
             return answers
@@ -192,17 +221,20 @@ class Jev:
         # Identical requests already in the air share one call; logs repeat themselves a lot.
         flight = "|".join(sorted(keys[qid] for qid in misses))
         task = self._flights.get(flight)
+        source = "api" if task is None else "shared"
         if task is None:
             task = asyncio.ensure_future(self._call(state, misses, on_cost=on_cost))
             self._flights[flight] = task
             task.add_done_callback(lambda _: self._flights.pop(flight, None))
         else:
             self.meter.cached += 1
-        by_key = await task
+        by_key, metadata = await task
+        if provenance is not None:
+            provenance.update({qid: metadata | {"source": source} for qid in misses})
         return answers | {qid: by_key[keys[qid]] for qid in misses}
 
-    async def _call(self, state, questions: dict[str, dict], *, on_cost=None) -> dict[str, dict]:
-        """One request, retried inside a total time budget. Returns answers by cache key."""
+    async def _call(self, state, questions: dict[str, dict], *, on_cost=None) -> tuple[dict[str, dict], dict]:
+        """One request, retried inside a total time budget. Returns answers by cache key, and who gave them."""
         body = {"model": self.model, "state": state, "questions": questions}
         deadline = time.monotonic() + self.timeout
         last = "no attempt made"
@@ -237,7 +269,7 @@ class Jev:
                 await asyncio.sleep(max(0.0, min(pause, deadline - time.monotonic())))
         raise JevError(f"gave up after {self.timeout:g}s ({last})")
 
-    def _record(self, state, questions: dict, data: dict, seconds: float, *, on_cost=None) -> dict[str, dict]:
+    def _record(self, state, questions: dict, data: dict, seconds: float, *, on_cost=None) -> tuple[dict[str, dict], dict]:
         usage = data.get("usage") or {}
         tokens = usage.get("input_tokens") or 0
         cost = usage.get("cost")
@@ -260,11 +292,17 @@ class Jev:
             _validate_answer(qid, q, answers[qid])
             k = Cache.key(self.model, state, q, endpoint=self.url)
             out[k] = answers[qid]
+        # The model the API names, literally. The meter's falls back to the one requested; this must not, since a
+        # saved scale vouches for it. The fields are jlink's, so either tool can read what the other recorded.
+        resolved = data.get("model")
+        metadata = {"version": 1, "provider": self.backend.name, "requested_model": self.model,
+                    "resolved_model": resolved if isinstance(resolved, str) and resolved.strip() else None,
+                    "answered_at": time.time()}
         # Validate the entire response before storing any part of it.
         if self.cache:
             for k, answer in out.items():
-                self.cache.put(k, answer)
-        return out
+                self.cache.put(k, answer, metadata=metadata)
+        return out, metadata
 
 
 def _validate_answer(qid: str, question: dict, answer) -> None:

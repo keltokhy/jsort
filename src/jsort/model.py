@@ -12,6 +12,9 @@ away. A light ridge pins the mean of theta at zero and keeps a text that wins ev
 
 Fitting is Newton's method with the linear solve done by conjugate gradients, so no n-by-n matrix is
 built until the standard errors, and refitting after every round of comparisons stays cheap.
+
+`place` is the same model with one free parameter: a new text against anchors that keep the scores a
+saved scale gave them.
 """
 
 from __future__ import annotations
@@ -223,6 +226,50 @@ def standard_errors(n: int, first, second, y, fitted: Fit, ridge: float = RIDGE)
                     + inv[n, n] + 2 * inv[first, n] - 2 * inv[second, n])
     cov = inv @ accumulate(r2 / (1 - np.clip(leverage, 0.0, 0.9)) ** 2) @ inv
     return np.sqrt(np.clip(np.diag(cov)[:n], 0.0, None))
+
+
+def place(anchor, leads, y, gamma: float, *, start: float = 0.0, ridge: float = RIDGE,
+          tol: float = 1e-9, max_iter: int = 100) -> tuple[float, float]:
+    """One new text against anchors whose scores stay fixed: its score and standard error.
+
+    `anchor` holds the score of the anchor in each comparison and `leads` says whether the new text was
+    the one shown first. The likelihood is the one `fit` maximises with every parameter but this text's
+    held where the scale left it: the anchors at their scores and the lean at the scale's gamma. The
+    ridge is the fit's too, centred on the scale's zero, so a text that beats every anchor with
+    certainty still gets a finite score.
+
+    The standard error is the sandwich `standard_errors` computes, in one dimension: the observed
+    information on either side of the leverage-corrected squared residuals. It is conditional on the
+    anchors, whose own errors it does not carry.
+    """
+    anchor, y = np.asarray(anchor, dtype=float), np.asarray(y, dtype=float)
+    sign = np.where(np.asarray(leads, dtype=bool), 1.0, -1.0)
+    if len(y) == 0:
+        return float("nan"), float("nan")
+
+    def objective(t: float) -> float:
+        d = sign * (t - anchor) + gamma
+        return float(np.sum(y * _log_sigmoid(d) + (1 - y) * _log_sigmoid(-d)) - 0.5 * ridge * t * t)
+
+    t, value = float(start), objective(float(start))
+    for _ in range(max_iter):
+        s = _sigmoid(sign * (t - anchor) + gamma)
+        step = float(np.sum(sign * (y - s)) - ridge * t) / float(np.sum(s * (1 - s)) + ridge)
+        # Concave in one dimension, so the same halving that guards `fit` is enough here.
+        scale = 1.0
+        while scale > 1e-4 and objective(t + scale * step) < value:
+            scale /= 2
+        if scale <= 1e-4:
+            break
+        t, value = t + scale * step, objective(t + scale * step)
+        if abs(scale * step) < tol:
+            break
+
+    s = _sigmoid(sign * (t - anchor) + gamma)
+    w, r2 = s * (1 - s), (y - s) ** 2
+    info = float(w.sum() + ridge)
+    leverage = np.clip(w / info, 0.0, 0.9)
+    return t, float(np.sqrt(np.sum(r2 / (1 - leverage) ** 2)) / info)
 
 
 def _largest_component(n: int, first: np.ndarray, second: np.ndarray) -> np.ndarray:

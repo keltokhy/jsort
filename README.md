@@ -63,7 +63,9 @@ jsort finds a key the way [jgrep](https://github.com/keltokhy/jgrep) does: `TYPE
 environment or from `~/.config/jev/typesafe.key`, `openrouter.key` or `gateway.key`. Force a choice
 with `--api` or `JEV_API`. The two tools share one cache file. jsort keys answers by endpoint as well
 as model and question, so switching gateways cannot reuse another gateway's answers. Older entries
-without endpoint information remain on disk but are not reused.
+without endpoint information remain on disk but are not reused. jsort also records which model gave
+each answer, in the `answer_metadata` table jlink introduced beside `answers`. The `answers` table
+and its keys are unchanged, so the other tools and older versions read and write the file as before.
 
 ## Use
 
@@ -78,23 +80,30 @@ jsort --jsonl --field event.message "angrier" events.jsonl   # full records come
 jsort --csv --field narrative -o --keep-order --name breadth \
       "drew broader participation" events.csv > scored.csv    # add a variable, keep the row order
 jsort --json "more urgent" tickets.txt                       # rank, score, se and source line
+jsort --save-scale hawkish.json "more hawkish about inflation" statements.txt   # sort, and keep the scale
+jsort --scale hawkish.json -o september.txt                  # place new texts on the saved scale
 ```
 
 | Option | Meaning |
 |---|---|
-| `-k N` | Comparisons each text takes part in. Default 10, minimum 2. The run asks about N/2 questions per text. |
+| `-k N` | Comparisons each text takes part in. Default 10, minimum 2. The run asks about N/2 questions per text. With `--scale`, the comparisons each new text gets, all of them with anchors. |
 | `--top N` | Print only the top N. Texts that are clearly out of the running stop being asked about, and their questions go to the contenders. With `-r` it is the bottom N that is hunted and printed. |
 | `-r` | Lowest first. |
 | `-o` | Put the score and its standard error in the first two tab-separated columns. With `--csv` or `--jsonl`, add `jsort_score`, `jsort_se` and `jsort_n` to each record. |
 | `--name NAME` | Call those fields `NAME_score`, `NAME_se` and `NAME_n`, so that one file can carry several scales. |
-| `--keep-order` | Print in input order. With `-o` this adds scores to a file without rearranging it. |
+| `--keep-order` | Print in input order. With `-o` this adds scores to a file without rearranging it. With `--scale`, each text prints as soon as it and the texts before it are placed. |
 | `-n`, `-H` | Prefix each line with its line number or file name. |
 | `--json` | One JSON object per text: `rank`, `score`, `se`, `comparisons`, `file`, `line`, `text`. |
 | `--jsonl --field NAME`, `--csv --field NAME` | Compare one field and return the complete records. JSON fields can be dotted paths. |
 | `--para`, `--whole` | Sort paragraphs or whole files in place of lines. |
 | `--seed N` | Seed for the choice of pairs. Default 0. The same seed asks the same questions, so a rerun comes from the cache. |
+| `--save-scale FILE` | Also write the fitted scale to FILE, for `--scale` to place later texts on. Not with `--top`. See [Anchored scales](#anchored-scales). |
+| `--anchors N` | With `--save-scale`, how many texts to keep as anchors. Default 30, minimum 2. |
+| `--scale FILE` | Place the input on the scale saved in FILE. The description comes from the file. Each text is compared with the scale's anchors only. |
+| `--unordered` | With `--scale`, print each text as soon as it is placed, not in input order. |
+| `--any-model` | With `--scale`, place even though the API, endpoint or model is not the one the scale was built with, or the scale cannot name one. With `--save-scale`, save even though the answers behind the fit do not all name one model. |
 | `--budget DOLLARS` | Stop asking once this much is spent and sort on what is known. Default 1.00, or `$JSORT_BUDGET`; 0 for no limit. |
-| `--max-chars N` | Show Jev only the first N characters of a text. Default 8000. |
+| `--max-chars N` | Show Jev only the first N characters of a text. Default 8000; with `--scale`, the scale's. |
 | `-j N`, `--timeout`, `--no-cache`, `--api`, `--model`, `--stats` | As in jgrep. |
 
 Blank lines are dropped. Identical texts are compared once and share a score. Several files are
@@ -117,7 +126,8 @@ participation". It goes into one question, `Text A ranks higher than text B on t
 **Score.** The position on the scale, in logit units, centred on zero. A gap of 1.0 between two
 texts means Jev gives the higher one about 73% in a head-to-head; a gap of 3 means about 95%.
 Scores are relative to the other texts in the same run. They do not carry over to another file or
-another description.
+another description, unless the run's scale is saved and the other file is placed on it
+([Anchored scales](#anchored-scales)).
 
 **Standard error.** How well the comparisons pin the score down. Jev's answer is a probability, not
 a win or a loss, so the model is a fractional logit and the errors are the robust (sandwich) kind,
@@ -137,6 +147,146 @@ description is not one these texts can be ranked on. In simulation it tracks the
 Positions are randomised and balanced and the lean is estimated with the scale, as home advantage
 is in a sports model, so it does not tilt the scores. It has been a few points either way.
 
+## Anchored scales
+
+Every sort fits its own scale, so two runs cannot be compared and a new text cannot be scored without
+sorting everything again. That rules out a panel, where next month's texts have to land on the scale
+the earlier months are on, and it rules out measuring anything as it happens. A saved scale allows both.
+
+```bash
+jsort --whole --max-chars 16000 --save-scale hawkish.json \
+      "more hawkish about inflation" statements/*.txt          # an ordinary sort that also saves its scale
+jsort --whole --scale hawkish.json -o statements/2026-10-28.txt   # a later statement, on the same scale
+jsort --csv --field narrative --scale breadth.json -o --keep-order --name breadth new_events.csv > scored.csv
+tail -f captions.txt | jsort --scale hawkish.json -o --keep-order  # each line scored as it is spoken
+```
+
+These are commands only. Output from live runs of them is still to be added.
+
+**Saving.** `--save-scale FILE` changes nothing about the sort. It writes a JSON file holding the
+description, the question exactly as Jev was asked it, the API, endpoint and model ID that were asked,
+a count of the fit's answers by the model that gave them, `--max-chars` and how the texts were read, a
+summary of the fit (texts, comparisons, reliability, the first-position lean, the ridge) and the
+anchors: a text, its score and its standard error each. The anchors are 30 of the sorted texts by
+default (`--anchors N`).
+The highest and the lowest are always kept. Between them the range of scores is cut into equal
+stretches and the text with the smallest reported standard error is taken from each. This spreads
+anchors over the scale and favours small reported errors; it does not establish that those texts
+are better measured. Thirty puts about six anchors within a logit of
+any point on a scale ten logits long, which is what the two adaptive rounds of a default placement
+look for. The file holds the anchors and not every sorted text: the sort's own output already has
+every score, and a scale built on thousands of documents stays small enough to keep with a project.
+`--anchors` can be raised to the number of texts. Anchor texts are stored verbatim as Jev saw them,
+after truncation to `--max-chars`. Sharing the scale file shares those texts, including any private
+information in them.
+
+Placement takes an anchor's score as exact, so jsort is careful about what becomes one. `--save-scale`
+cannot be combined with `--top`: that run stops asking about texts that are out of the running, and
+the far end of its scale, which would be kept as an anchor, rests on two or three comparisons. A text
+is eligible only if it took part in at least half of `-k` comparisons. A complete sort leaves every
+text eligible. One that stopped at the budget may not: the file records how many texts qualified,
+stderr says so, and if fewer than two did no scale is written.
+Loading a scale with `--scale` also warns if its fit summary records an over-budget run or failed
+comparisons. Such a scale can still be used; rebuild it for a complete fit.
+
+A scale also has to be able to say which model it was built on, because that is what later
+placements are checked against. jsort records in the cache which model gave each answer, as the API
+named it, and a fit counts its answers by model. If the answers name two models (an alias such as
+`jev-latest` moved between two runs and the cache kept the earlier answers), or if some name none
+(cache entries written before jsort recorded it, or an API that does not name its model), the scale
+is not saved and jsort says why. `--no-cache`, or a pinned `--model`, gives a fit from one model.
+`--any-model` saves anyway; the file then records the counts as they are, never one name standing
+for answers that did not give it, and `--scale` will need `--any-model` as well.
+
+**Placing.** `jsort --scale FILE` takes the description from the file. A different description on the
+command line is an error, not an override. Each new text is compared with anchors and with nothing
+else. Its score is the one-parameter version of the fit the scale came from: the anchors stay at their
+saved scores, the first-position lean stays at the value that fit estimated, Jev's probabilities are
+used as they are, and the ridge that fit used keeps the score finite. The standard error is the same
+robust kind, from the text's own comparisons. Anchors are chosen as a computerised adaptive test
+chooses items. The first round draws anchors from across the whole scale. The second and third take
+the anchors nearest the running estimate, where a comparison says the most. A round's questions go
+out together, so a text is placed in about three round trips. The new text is shown first in about
+half of its comparisons. Every text gets all `-k` of its comparisons. There is no option to stop once
+a standard error looks small: a rule that stops on the reported error selects for small estimates of
+it, which shortens the intervals, to save one round trip at most. A text that is itself an anchor
+gets its saved score and costs nothing.
+
+**Independence.** What a text is asked depends on the scale, the seed and the text, and on nothing
+else in the input, and placing it never changes the scale file. So a text placed in full, on all the
+comparisons `-k` asks for, gets the same score alone, in a file of a million, or on a pipe. What the
+rest of the input can change is whether the budget reaches a text at all. jsort admits a text only
+when the budget covers its whole placement, and admits texts in input order, so when the money runs
+out some texts are placed in full and the rest get no score. A text is placed on fewer comparisons
+than `-k` asked for only if something cuts it short once it has begun: a comparison that fails, a
+refusal from the API, or a rise in price. Such a score is not the one a full placement gives, and it
+is marked: `"partial": true` in `--json`, `NAME_partial` with `-o` on CSV and JSONL, and a line on
+stderr. Within one placement run, copies of the same shown text share one result, even with
+`--no-cache`; differences after `--max-chars` do not count. Across runs, uncached scores can still
+differ if Jev gives different answers.
+
+Since a score owes nothing to the rest of the input, `--scale` does not have to read everything first:
+
+| Output | Behaviour |
+|---|---|
+| default, `-r`, `--top N` | Sorted, as jsort always prints. A sort has to wait for the end of the input. `--top` only trims the output here. |
+| `--keep-order` | Streams. A text prints as soon as it and the texts before it are placed. |
+| `--unordered` | Streams. A text prints as soon as it is placed. |
+
+Streaming follows jgrep. With ordered output `-j N` bounds the texts in hand, those being placed and
+those waiting for an earlier text to print, so a slow text cannot let the rest of the input run ahead.
+Remembering duplicates retains one text hash and result per distinct shown text for the run, so that
+memory grows with the number of distinct texts, including in a stream.
+`--json` has no `rank` to give while streaming and prints `null`. In a sorted run the rank is among
+the texts of that input.
+
+**Beyond the anchors.** A text that scores above the highest anchor or below the lowest is outside
+the range of its eligible anchors. Far outside that range, answers saturate and the ridge pulls
+the score inward: the score is censored toward the scale and is best read as a bound, and its
+standard error is not meaningful. A small reported error does not establish precision there.
+Rebuild the scale with such texts included. For a score more than two logits past either end anchor,
+jsort leaves the standard error empty. This margin is a reporting rule, not a guarantee that errors
+closer to the anchors are calibrated. The score stays finite and flagged. `--json` carries `"beyond": "above"` or `"below"`,
+`-o` on CSV and JSONL adds a `NAME_beyond` field, and stderr says how many texts fell outside and
+where the anchors end. Scores and errors stay numeric or empty: blank in plain `-o` and CSV, `null`
+in `--json` and JSONL. While streaming, stderr names each such
+text as it prints, up to ten of them.
+
+**The same model.** Scores from different models are not comparable. jsort asks the scale's API and
+model unless `--api`, `--model` or the environment name others, and refuses before any call when the
+API, the endpoint or the model ID differs from the scale's, or when the scale cannot name one model.
+It then checks every answer it uses against the model the scale names, the cached answers too, since
+the cache keys on the ID that was asked for and not on who replied. If the scale was built through
+an alias such as `jev-latest` and that alias now reaches a newer model, the first uncached answer
+shows it and the run stops. That request goes alone until its answering model is confirmed, even
+with `--budget 0`; cached answers cannot confirm where the alias points today. A model refusal
+exits with code 2 and prints no batch scores; a stream stops printing when it detects the refusal.
+Pinning the model that answered, by the ID the message gives, is accepted. An
+answer that names no model cannot be checked, and stderr says how many there were. `--any-model`
+overrides all of these checks.
+
+In simulation (`bench/simulate.py`, a judge with a known scale), 100 new texts placed at the default
+`-k 10` on a scale saved from 200 land 0.28 logits (root mean square) from where a fit to every pair
+of all 300 would put them. The 200 sorted texts themselves are 0.26 from it. Intervals of 1.96
+standard errors cover that target 91% of the time, against 95% for the sorted texts, and 92% at
+`-k 16`. No live benchmark of placement has been run yet.
+
+Limits. The standard error treats anchors as exact and omits their errors, which are shared by texts
+placed against them. An error estimate built on about ten residuals is itself noisy, so multiplying
+it by 1.96 also understates interval uncertainty. Coverage is lower at small `-k`. For a new text
+with fewer than three successful comparisons, jsort leaves the standard error empty, even when it
+can give a score. An offline review found that using a t quantile with n-1 degrees of freedom
+(n successful comparisons) together with an anchor-error term restored nominal coverage in its
+simulation. That correction is not applied to the reported errors, and it is not evidence of
+coverage on real texts.
+
+The model check is only as good as the name the API gives: if a provider reports
+an alias as the answering model, jsort cannot see the revision behind it, so pin the model with
+`--model` when building a scale that has to last. jsort cannot tell whether new texts are the kind the scale was built on: sentences can be placed
+on a scale of whole statements, and whether that means anything is for the user to judge. A placed
+text costs up to `-k` comparisons of its own, twice its share of a sort, where every comparison is
+shared by two texts.
+
 ## From Python
 
 ```python
@@ -153,6 +303,22 @@ applies here too: spending stops at `budget=` dollars, by default `$JSORT_BUDGET
 `r.over_budget` says whether it was reached. It works inside a notebook. `jsort.arank` is the same
 thing as a coroutine, for a client you already hold. Each concurrent ranking has its own budget;
 a shared request is charged to the ranking that starts it, and cached answers are free.
+
+```python
+scale = r.scale(anchors=30)                  # the run's scale, as --save-scale writes it
+scale.save("hawkish.json")
+
+p = jsort.place(new_statements, "hawkish.json", per_item=10)   # or a jsort.Scale; aplace is the coroutine
+p.score, p.se, p.comparisons                 # aligned with new_statements, on the saved scale
+p.beyond                                     # +1 above every anchor, -1 below, 0 within
+p.partial                                    # True where a text was cut short of its comparisons
+```
+
+`r.scale()` raises `jsort.ScaleError` for a run that used `top`, for one that stopped before two texts
+were measured well enough to anchor anything, and for a fit whose answers do not all name one model.
+`jsort.place` raises it for a scale it cannot read, one that cannot name its model, or a model the
+scale was not built with. `any_model=True` is the override for the model checks in both. `seed=` and
+`budget=` are as on the command line.
 
 ## How it chooses pairs
 
@@ -187,6 +353,21 @@ only pays for the new ones.
 With a budget, jsort starts with one request and sizes later concurrent batches using the largest
 charge observed so far. Costs are reported after completion, so a final request or an unexpected
 increase in request cost can still take spending above the threshold. `--budget 0` disables this limit.
+
+The budget covers a `--scale` run too, more carefully, because texts arrive one by one and a short
+first text says nothing about the price of a long one behind it. Each request is priced before it is
+sent, from its own size (a token for every four bytes and 270 of overhead, as `jgrep --estimate`
+counts), at the dearest rate per estimated token seen so far, and at one and a half times the list
+price until a charge has been seen. Requests already in the air count at today's rate. The first
+request of a run goes alone, and the number of texts being placed at once then doubles with each
+text that finishes without the rate rising, from one up to `-j`, which is five doublings at the
+default `-j 32`; a rise sends it back to one. A text is begun only if the budget covers all of its comparisons, so the
+budget stops a run between texts, and since the reservation is a cautious estimate a little of the
+budget is usually left unspent. It is still not a hard cap: cost is known only when a reply arrives,
+so the calls in the air at the moment a price rises can take spending past the limit, by at most
+`-j` requests at the new price. A stream that reaches the budget stops reading, finishes the texts
+it has begun, and exits with status 2. For a long-lived `tail -f`, set your own default once with
+`export JSORT_BUDGET=20`, or `0` for no limit.
 
 ## How well does it work
 
@@ -241,8 +422,8 @@ all from March 2020 to January 2021.
   ("easier to read") are the dimensions shown above.
 - jsort shines where levels are hard to name. You do not need a rubric or labeled examples, only a
   way to say what "more" means, and it keeps discriminating among texts that sit close together.
-- When the scale is going into a model, use `-o`: every score comes with a standard error, and the
-  run comes with a reliability figure, so the measurement error travels with the measure.
+- When the scale is going into a model, use `-o` to keep the reported standard errors with the scores.
+  A sort also reports reliability; placement errors have the limits described above and can be empty.
 - For results that must reproduce, pin the model with `--model` (for example `typesafe/jev-1.13` on
   OpenRouter) and keep the cache file with the project. The cache makes a rerun exact and free.
 - For long documents raise `--max-chars`, or cut them to the passages that bear on the dimension
@@ -252,16 +433,18 @@ all from March 2020 to January 2021.
 
 ```bash
 uv sync && uv run pytest              # offline: a fake API, no key
-uv run python bench/simulate.py       # offline: a simulated judge with a known scale
+uv run python bench/simulate.py       # offline: a simulated judge with a known scale, sorting and placing
 uv run python bench/probe.py          # live, under a cent: which question shape to use
 uv run --group bench python bench/readability.py prepare && uv run --group bench python bench/readability.py run
 ```
 
-`src/jsort/model.py` is the scale: the fit, the standard errors, reliability and the test `--top`
-uses. `schedule.py` chooses pairs. `engine.py` runs the rounds and is the Python API. `inputs.py`
-reads lines, paragraphs, files, CSV and JSONL. `core.py` is based on jgrep's client: backends,
+`src/jsort/model.py` is the scale: the fit, the standard errors, reliability, the test `--top`
+uses and the one-parameter fit that places a text. `schedule.py` chooses pairs. `engine.py` runs the
+rounds and is the Python API. `scale.py` is the saved scale: the file, the choice of anchors and the
+model check. `placement.py` places texts on one. `inputs.py` reads lines, paragraphs, files, CSV and
+JSONL, as a generator so that placement can stream. `core.py` is based on jgrep's client: backends,
 retries inside a time budget, the cache, in-flight deduplication and the cost meter, with per-call
-cost tracking for the budget scheduler.
+cost tracking for the budget scheduler and, per answer, the model that gave it.
 
 Why a noul and not a choice: `bench/probe.py` asks every ordered pair of ten texts both ways. A
 two-option `choice` and a `noul` ("A ranks higher than B") made the same decisions, 95.6% correct,

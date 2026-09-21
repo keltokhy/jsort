@@ -1,10 +1,12 @@
 """The scale itself: fitting, standard errors and the diagnostics. No network."""
 
 import itertools
+import math
 
 import numpy as np
+import pytest
 
-from jsort.model import Fit, fit, information, reliability, shortfall, standard_errors
+from jsort.model import Fit, fit, information, place, reliability, shortfall, standard_errors
 
 
 def all_pairs(theta, gamma=0.0, noise=0.0, seed=0):
@@ -115,3 +117,46 @@ def test_fit_does_not_claim_convergence_it_did_not_reach():
     first, second, y = all_pairs(theta)
     assert fit(8, first, second, y).converged
     assert not fit(8, first, second, y, max_iter=1).converged
+
+
+def test_placing_against_fixed_anchors_is_the_joint_fit_in_one_coordinate():
+    # Hold every other text where the joint fit left it, and the lean too: the one-parameter optimum is the joint one.
+    theta = np.linspace(-2.5, 2.5, 11)
+    first, second, y = all_pairs(theta, gamma=-0.2, noise=0.4, seed=7)
+    joint = fit(11, first, second, y)
+    joint_se = standard_errors(11, first, second, y, joint)
+    for text in (0, 4, 10):
+        met = (first == text) | (second == text)
+        leads = first[met] == text
+        anchors = np.where(leads, joint.theta[second[met]], joint.theta[first[met]])
+        score, se = place(anchors, leads, y[met], joint.gamma)
+        assert abs(score - joint.theta[text]) < 1e-5
+        assert 0.85 < se / joint_se[text] < 1.15  # and the error is the one the fit reports, to within a few percent
+
+
+def test_placement_uses_the_lean_and_the_probabilities():
+    anchors, lean = np.array([-1.0, 0.0, 1.0, 2.0]), 0.4
+    leads = np.array([True, False, True, False])
+    y = 1 / (1 + np.exp(-(np.where(leads, 1, -1) * (0.7 - anchors) + lean)))
+    score, se = place(anchors, leads, y, lean)
+    assert abs(score - 0.7) < 0.01 and se < 0.01           # answers that sit on the scale pin the text down
+    assert abs(place(anchors, leads, y, 0.0)[0] - 0.7) < 0.05 < abs(place(anchors, ~leads, y, 0.0)[0] - 0.7)
+    wins = (y > 0.5).astype(float)                           # the same answers as wins and losses say less
+    assert abs(place(anchors, leads, wins, lean)[0] - 0.7) > 0.1
+
+
+def test_a_text_beyond_every_anchor_is_placed_finitely():
+    anchors = np.linspace(-3, 3, 8)
+    leads = np.arange(8) % 2 == 0
+    above, se = place(anchors, leads, np.where(leads, 1.0, 0.0), -0.1)       # beat every anchor, with certainty
+    below, _ = place(anchors, leads, np.where(leads, 0.0, 1.0), -0.1)
+    assert np.isfinite([above, below, se]).all() and 3 < above < 15 and -15 < below < -3
+    assert all(np.isnan(place([], [], [], 0.0)))
+
+
+def test_placed_standard_error_corrects_for_leverage():
+    # Three equally informative comparisons, balanced around p=0.5: the optimum is exactly zero.
+    # HC3 divides the residual norm by information minus one comparison's weight; HC0 omits that weight.
+    score, se = place([0, 0, 0], [True, True, True], [0.15, 0.5, 0.85], 0, ridge=0.01)
+    assert score == pytest.approx(0, abs=1e-12)
+    assert se == pytest.approx(math.sqrt(2 * 0.35 ** 2) / (0.76 - 0.25))

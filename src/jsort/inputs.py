@@ -1,4 +1,5 @@
-"""Reading what is to be sorted. Like sort(1), everything is read before anything is printed."""
+"""Reading what is to be sorted. Like sort(1), a sort reads everything before anything is printed; placing texts
+on a saved scale does not have to, so the reading itself is a generator."""
 
 from __future__ import annotations
 
@@ -47,8 +48,13 @@ def as_text(value) -> str:
 
 
 @contextmanager
-def _open(name: str):
-    if name == "-":
+def _open(name: str, private: bool = False):
+    if name == "-" and private and (fd := _descriptor(sys.stdin)) is not None:
+        # A thread reads a live pipe. Were it to hold sys.stdin's lock when the run stops, the interpreter
+        # could not shut down cleanly, so it reads the same descriptor through a reader of its own, as jgrep does.
+        with open(fd, encoding="utf-8-sig", errors="replace", newline="", closefd=False) as stream:
+            yield stream
+    elif name == "-":
         stream = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8-sig", errors="replace", newline="")
         try:
             yield stream
@@ -59,15 +65,21 @@ def _open(name: str):
             yield stream     # -sig drops the byte-order mark Excel writes
 
 
-def read(files: list[str], args) -> tuple[list[Record], list[str] | None, list[str]]:
-    """Records, the CSV header if there is one, and the problems met along the way."""
-    records: list[Record] = []
+def records(files: list[str], args, stop=None):
+    """Everything in the input, in order and as it is read: a Record for each text, a list for the CSV
+    header (once, before its rows) and a string for each problem met along the way.
+
+    Nothing is read ahead of what is asked for, so a pipe that is still being written to can be placed
+    on a saved scale line by line. `stop` is a threading.Event that ends the reading early.
+    """
     header: list[str] | None = None
-    problems: list[str] = []
+    halted = stop.is_set if stop is not None else lambda: False
     for name in files or ["-"]:
+        if halted():
+            return
         label = STDIN if name == "-" else name
         try:
-            with _open(name) as f:
+            with _open(name, private=stop is not None) as f:
                 if args.csv:
                     reader = csv.DictReader(f)
                     if reader.fieldnames is None:
@@ -78,45 +90,76 @@ def read(files: list[str], args) -> tuple[list[Record], list[str] | None, list[s
                         raise InputError(f"no column named {args.field!r}")
                     if header is not None and list(reader.fieldnames) != header:
                         raise InputError("its header differs from the first file's; sort files with one header at a time")
-                    header = list(reader.fieldnames)
+                    if header is None:
+                        header = list(reader.fieldnames)
+                        yield header
                     for row in reader:
-                        records.append(Record(as_text(row.get(args.field)), "", label, reader.line_num, row))
+                        if halted():
+                            return
+                        yield Record(as_text(row.get(args.field)), "", label, reader.line_num, row)
                 elif args.jsonl:
                     for lineno, line in enumerate(f, 1):
+                        if halted():
+                            return
                         line = line.rstrip("\r\n")
                         if not line.strip():
                             continue
                         try:
                             obj = json.loads(line)
                             if not isinstance(obj, dict):
-                                problems.append(f"{label}:{lineno}: expected a JSON object")
+                                yield f"{label}:{lineno}: expected a JSON object"
                                 continue
-                            records.append(Record(as_text(lookup(obj, args.field)), line, label, lineno, obj))
+                            yield Record(as_text(lookup(obj, args.field)), line, label, lineno, obj)
                         except ValueError:
-                            problems.append(f"{label}:{lineno}: not valid JSON")
+                            yield f"{label}:{lineno}: not valid JSON"
                         except KeyError:
-                            problems.append(f"{label}:{lineno}: no field {args.field!r}")
+                            yield f"{label}:{lineno}: no field {args.field!r}"
                 elif args.whole:
-                    records.append(Record(f.read(), label, label, 1))
+                    yield Record(f.read(), label, label, 1)
                 elif args.para:
                     block: list[str] = []
                     start = 1
                     for lineno, line in enumerate(f, 1):
+                        if halted():
+                            return
                         line = line.rstrip("\r\n")
                         if line.strip():
                             if not block:
                                 start = lineno
                             block.append(line)
                         elif block:
-                            records.append(Record("\n".join(block), "\n".join(block), label, start))
+                            yield Record("\n".join(block), "\n".join(block), label, start)
                             block = []
                     if block:
-                        records.append(Record("\n".join(block), "\n".join(block), label, start))
+                        yield Record("\n".join(block), "\n".join(block), label, start)
                 else:
                     for lineno, line in enumerate(f, 1):
+                        if halted():
+                            return
                         line = line.rstrip("\r\n")
                         if line.strip():
-                            records.append(Record(line, line, label, lineno))
+                            yield Record(line, line, label, lineno)
         except (OSError, InputError, csv.Error) as e:
-            problems.append(f"{label}: {e.strerror if isinstance(e, OSError) and e.strerror else e}")
-    return records, header, problems
+            yield f"{label}: {e.strerror if isinstance(e, OSError) and e.strerror else e}"
+
+
+def _descriptor(stream) -> int | None:
+    try:
+        return stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def read(files: list[str], args) -> tuple[list[Record], list[str] | None, list[str]]:
+    """Records, the CSV header if there is one, and the problems met along the way."""
+    found: list[Record] = []
+    header: list[str] | None = None
+    problems: list[str] = []
+    for item in records(files, args):
+        if isinstance(item, Record):
+            found.append(item)
+        elif isinstance(item, list):
+            header = item
+        else:
+            problems.append(item)
+    return found, header, problems

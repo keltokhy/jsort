@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+- Save a run's scale with `--save-scale FILE`: the description, the question as it was asked, the API, endpoint
+  and model ID that were asked, a count of the fit's answers by the model that gave them, `--max-chars`, a summary
+  of the fit and the anchors, each a text with its score and standard error. `--anchors N` (default 30) keeps the
+  highest and lowest texts and, between them, the text with the smallest reported error in each equal stretch
+  of the score range. Anchor texts are stored verbatim as shown to Jev; sharing the file shares those texts.
+- Only a text with at least half of `-k` comparisons can be an anchor, which excludes nothing in a complete sort.
+  `--save-scale` cannot be combined with `--top`, whose far end is barely measured, and a run the budget cut
+  short records how many texts qualified and says so.
+- Record which model gave each answer, in the `answer_metadata` table jlink introduced beside `answers` in the
+  shared cache. The `answers` table and its keys are unchanged, so jgrep, jlink, jcol and jsort 0.1.3 read and
+  write the file as before. A scale is saved only when every answer behind it names the same model; one that
+  mixes two, or rests on answers that name none, is refused with the reason. `--any-model` saves it anyway, with
+  the counts as they are.
+- Place new texts on a saved scale with `--scale FILE`. Each text is compared with anchors only, chosen
+  adaptively over about three rounds, and scored by the one-parameter version of the fit, with the anchors, the
+  first-position lean and the ridge held where the scale left them. Every text gets all `-k` of its comparisons.
+  The description comes from the file; a different one on the command line is an error.
+- A text placed in full scores the same alone or in any company, so `--scale` can stream: `--keep-order` prints
+  each text once it and those before it are placed, with `-j` bounding the texts in hand as in jgrep, and
+  `--unordered` prints as texts are placed. Sorted output still waits for the end of the input.
+- Under `--scale` the budget prices each request from its size before sending it, sends the first alone, widens
+  from one text in hand to `-j` as prices hold, and begins a text only if it can pay for all of it. When the money
+  runs out some texts are placed in full and the rest not at all. Calls in the air when a price rises can still
+  exceed it.
+- Flag a text placed beyond the anchors (`beyond`) and one cut short of its comparisons (`partial`): in `--json`,
+  as `NAME_beyond` and `NAME_partial` with `-o` on CSV and JSONL, and on stderr.
+- Refuse a scale built with another API, endpoint or model, or one that cannot name its model, before any call.
+  Every answer used is then checked against the scale's model, cached answers included, which is how an alias
+  that has moved is caught. `--any-model` overrides.
+- A scale file is validated field by field, and its question must be the one jsort asks for its description.
+- Leave a new text's placement standard error empty below three successful comparisons or more than two logits
+  beyond an end anchor; keep its score and flags. Empty errors are blank in plain output and CSV, null in JSON
+  and JSONL. Document censoring beyond the anchors, noisy errors at small `-k`, and the limits of interval coverage.
+- Send the first uncached placement request alone until the answering model is confirmed, including with
+  `--budget 0`. Refuse batch output on a model mismatch even after valid cached answers. A confirmed reply with
+  zero reported cost releases the gate; budget reservations still use the list-price estimate.
+- Reuse a placement for duplicate shown texts within the run, including with `--no-cache`. This retains a text
+  hash and result for each distinct shown text, including while streaming.
+- Warn when `--scale` loads a fit marked over budget or with failed comparisons. Require an integer schema version.
+- From Python: `Ranking.scale()`, `jsort.Scale`, `jsort.place` and `jsort.aplace`; `Jev.ask(..., provenance={})`
+  reports who gave each answer.
+- `bench/simulate.py` also measures placement against a fit to every pair, offline.
+- A negative `--seed` is a usage error, not a traceback. A closed pipe no longer raises while a CSV header is written.
+
 ## 0.1.3
 
 - Isolate cached answers by provider, endpoint, and model, and reset per-run budgets.

@@ -12,14 +12,11 @@ import numpy as np
 
 from .core import Jev, JevError, JevFatal
 from .model import Fit, fit, information, reliability, shortfall, standard_errors
+from .scale import DEFAULT_ANCHORS, Scale, build, identity, question  # noqa: F401  (question is part of this module's API)
 from .schedule import Schedule
 
 SETTLE = 3    # comparisons a text must have before --top may stop asking about it
 OUT = 4.0     # and how much worse the fit must get, in log-likelihood, were the text moved up into the top
-
-
-def question(description: str) -> dict:
-    return {"type": "noul", "instructions": f'Text A ranks higher than text B on this criterion: "{description}"'}
 
 
 @dataclass
@@ -35,6 +32,8 @@ class Ranking:
     errors: list[str] = field(default_factory=list)
     over_budget: bool = False
     fatal: str | None = None
+    gamma: float = 0.0             # the same lean in logits, as the model holds it; a saved scale places with it
+    run: dict | None = field(default=None, repr=False)   # what was asked, of whom, about which texts: what scale() saves
 
     @classmethod
     def unscored(cls, n: int) -> "Ranking":
@@ -45,6 +44,14 @@ class Ranking:
         scored = [i for i in range(len(self.score)) if not math.isnan(self.score[i])]
         scored.sort(key=lambda i: self.score[i] if reverse else -self.score[i])
         return scored + [i for i in range(len(self.score)) if math.isnan(self.score[i])]
+
+    def scale(self, anchors: int = DEFAULT_ANCHORS, *, unit: str | None = None, field: str | None = None,
+              any_model: bool = False) -> Scale:
+        """This run's scale, with `anchors` of its texts kept for placing later ones: `r.scale().save(path)`.
+
+        Raises ScaleError when the answers behind the fit do not all name one model, unless any_model is set.
+        """
+        return build(self, anchors, unit=unit, field=field, any_model=any_model)
 
 
 async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int = 10, top: int | None = None,
@@ -104,8 +111,9 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
                 out.over_budget = True
                 return None
             try:
-                answer = await jev.ask({"A": items[i], "B": items[j]}, {"q": q}, on_cost=record_cost)
-                return i, j, float(answer["q"]["noul"])
+                origin: dict = {}
+                answer = await jev.ask({"A": items[i], "B": items[j]}, {"q": q}, on_cost=record_cost, provenance=origin)
+                return i, j, float(answer["q"]["noul"]), (origin.get("q") or {}).get("resolved_model")
             except JevError as e:
                 out.errors.append(str(e))
             except JevFatal as e:
@@ -113,6 +121,7 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
             return None
 
     fitted = Fit(np.zeros(n), 0.0, True)
+    responders: dict[str | None, int] = {}     # which model gave each answer the fit uses; None where that is not known
     active = np.ones(n, dtype=bool)
     scheduled = 0
     while scheduled < total and not (out.fatal or out.over_budget):
@@ -155,6 +164,7 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
                     first.append(result[0])
                     second.append(result[1])
                     ys.append(result[2])
+                    responders[result[3]] = responders.get(result[3], 0) + 1
         fitted = fit(n, first, second, ys, start=fitted)
         if progress:
             progress(scheduled, total)
@@ -169,7 +179,10 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
             if m >= 0:
                 out.score[k], out.se[k], out.comparisons[k] = theta[m], se[m], compared[m]
         out.lean = float(1 / (1 + math.exp(-fitted.gamma)) - 0.5)
+        out.gamma = float(fitted.gamma)
         out.reliability = reliability(n, first, second, ys, seed=seed)
+        out.run = {"description": description, "question": q, "model": identity(jev, responders), "max_chars": max_chars,
+                   "per_item": per_item, "seed": seed, "top": top, "texts": shown}
     return out
 
 
