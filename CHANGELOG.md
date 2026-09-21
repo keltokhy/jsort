@@ -5,7 +5,8 @@
 - Save a run's scale with `--save-scale FILE`: the description, the question as it was asked, the API, endpoint
   and model ID that were asked, a count of the fit's answers by the model that gave them, `--max-chars`, a summary
   of the fit and the anchors, each a text with its score and standard error. `--anchors N` (default 30) keeps the
-  highest and lowest texts and, between them, the best measured text of each equal stretch of the score range.
+  highest and lowest texts and, between them, the text with the smallest reported error in each equal stretch
+  of the score range. Anchor texts are stored verbatim as shown to Jev; sharing the file shares those texts.
 - Only a text with at least half of `-k` comparisons can be an anchor, which excludes nothing in a complete sort.
   `--save-scale` cannot be combined with `--top`, whose far end is barely measured, and a run the budget cut
   short records how many texts qualified and says so.
@@ -31,6 +32,15 @@
   Every answer used is then checked against the scale's model, cached answers included, which is how an alias
   that has moved is caught. `--any-model` overrides.
 - A scale file is validated field by field, and its question must be the one jsort asks for its description.
+- Leave a new text's placement standard error empty below three successful comparisons or more than two logits
+  beyond an end anchor; keep its score and flags. Empty errors are blank in plain output and CSV, null in JSON
+  and JSONL. Document censoring beyond the anchors, noisy errors at small `-k`, and the limits of interval coverage.
+- Send the first uncached placement request alone until the answering model is confirmed, including with
+  `--budget 0`. Refuse batch output on a model mismatch even after valid cached answers. A confirmed reply with
+  zero reported cost releases the gate; budget reservations still use the list-price estimate.
+- Reuse a placement for duplicate shown texts within the run, including with `--no-cache`. This retains a text
+  hash and result for each distinct shown text, including while streaming.
+- Warn when `--scale` loads a fit marked over budget or with failed comparisons. Require an integer schema version.
 - From Python: `Ranking.scale()`, `jsort.Scale`, `jsort.place` and `jsort.aplace`; `Jev.ask(..., provenance={})`
   reports who gave each answer.
 - `bench/simulate.py` also measures placement against a fit to every pair, offline.
