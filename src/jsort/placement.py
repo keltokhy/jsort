@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import os
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from numbers import Integral, Real
 
 import numpy as np
 
-from .core import Jev, JevError, JevFatal
+from .core import PRICE_PER_MTOK, Jev, JevError, JevFatal
 from .engine import Ranking
 from .model import place as locate
 from .scale import Scale, ScaleError
@@ -35,53 +36,108 @@ class Placement(Ranking):
     that belongs to the run that fitted the scale."""
     beyond: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))   # +1 above every anchor, -1 below, else 0
     unverified: int = 0            # answers that did not say which model gave them, so could not be checked against the scale's
+    partial: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))   # placed on fewer comparisons than were planned
+
+
+def _tokens(model: str, state: dict, question: dict) -> int:
+    """What a request will bill, near enough to reserve for it: jgrep's estimate, a token for every four bytes
+    of the request and 270 of overhead."""
+    payload = json.dumps({"model": model, "state": state, "questions": {"q": question}}, ensure_ascii=False)
+    return math.ceil(len(payload.encode("utf-8")) / 4) + 270
 
 
 class _Purse:
     """The budget, shared by every text being placed at once.
 
-    arank sizes each batch of requests from the largest charge seen so far. Placement has no batches, so
-    each request reserves that charge before it goes out, and until a charge has been seen one request
-    goes alone to learn it. As there, the last request can take spending past the limit.
+    Nothing is reserved from what earlier replies happened to cost: a short probe says nothing about the long
+    documents behind it. A request is priced before it goes, from its own size, at the dearest rate per
+    estimated token seen so far, and until a charge has been seen at MARGIN times the list price.
+
+    A text is admitted only when the budget covers every comparison it may ask for, and texts are admitted in
+    input order. So when the money runs out some texts are placed in full and the rest not at all, and a score
+    does not depend on what else was in the input. Only a rise in price can cut a text short once it has begun,
+    and such a text is reported as partial.
+
+    While nothing is known the first request goes alone, and the number of texts in hand then doubles with each
+    text that finishes without the rate rising, from one up to -j; a rise sends it back to one. What can still
+    take spending past the limit is the calls in the air at the moment a price rises.
     """
 
-    def __init__(self, budget: float):
-        self.budget, self.spent, self.price, self.held, self.flying = budget, 0.0, 0.0, 0.0, 0
+    MARGIN = 1.5     # on the list price, while no charge has been seen
+    RISE = 1.25      # a rate this much above the one reserved at is a rise, not jitter in the estimate
+
+    def __init__(self, budget: float, width: int):
+        self.budget, self.width, self.spent = budget, width, 0.0
+        self.rate = 0.0                    # dollars per estimated token: the dearest seen
+        self.held = self.flying = 0        # tokens reserved by the texts in hand, and how many texts that is
+        self.flight = 0                    # tokens of the requests in the air
+        self.window, self.rises = 1, 0
+        self.tickets = self.serving = 0    # texts are admitted in the order they asked
+        self.gone: set[int] = set()
         self.over = False
         self.changed = asyncio.Condition()
+        self.probe = asyncio.Lock()
 
-    def charge(self, cost: float) -> None:
-        self.spent += cost
-        self.price = max(self.price, cost)
+    def price(self, tokens: int) -> float:
+        return tokens * (self.rate or PRICE_PER_MTOK / 1e6 * self.MARGIN)
 
     def remaining(self) -> float:
         # Roundoff at the limit must not buy an extra request.
         return 0.0 if math.isclose(self.spent, self.budget, rel_tol=1e-12) else self.budget - self.spent
 
-    async def admit(self, halted) -> float | None:
-        """Wait for room. Returns what was reserved, or None when the run has stopped or the budget is spent."""
-        if not self.budget:
-            return None if halted() else 0.0
-        async with self.changed:
-            while not halted():
-                remaining = self.remaining()
-                if remaining <= 0:
-                    self.over = True
-                    self.changed.notify_all()
-                    break
-                alone = self.flying == 0
-                if alone or (self.price and self.held + self.price <= remaining * (1 + 1e-12)):
-                    self.flying += 1
-                    self.held += self.price
-                    return self.price
-                await self.changed.wait()
-        return None
+    def charge(self, cost: float, tokens: int) -> None:
+        self.spent += cost
+        if cost / tokens > self.RISE * (self.rate or PRICE_PER_MTOK / 1e6 * self.MARGIN):
+            self.rises += 1
+            self.window = 1
+        self.rate = max(self.rate, cost / tokens)
 
-    async def release(self, reserved: float) -> None:
+    async def admit(self, tokens: int, stopped) -> int | None:
+        """Wait in line for room for a whole text. Returns the state of `rises` on admission, or None: the run has
+        stopped, or the budget cannot cover this text and nothing in hand will give any of it back."""
+        if not self.budget:
+            return None if stopped() else 0
+        ticket, self.tickets = self.tickets, self.tickets + 1
+        async with self.changed:
+            try:
+                while not (stopped() or self.over):
+                    if ticket == self.serving:
+                        if self.flying < self.window and self.price(self.held + tokens) <= self.remaining():
+                            self.held, self.flying = self.held + tokens, self.flying + 1
+                            return self.rises
+                        if not self.flying:
+                            self.over = True
+                            break
+                    await self.changed.wait()
+                return None
+            finally:       # admitted, refused or cancelled, the text leaves the line and the next one is served
+                self.gone.add(ticket)
+                while self.serving in self.gone:
+                    self.gone.discard(self.serving)
+                    self.serving += 1
+                self.changed.notify_all()
+
+    def take(self, tokens: int) -> bool:
+        """Whether a request may go, counting what is already in the air at today's rate. Its text's admission
+        covered it unless the price has risen since; then the request is not sent and the text is cut short."""
+        if self.budget:
+            if self.price(self.flight + tokens) > self.remaining():
+                self.over = True
+                return False
+            self.flight += tokens
+        return True
+
+    def give(self, tokens: int) -> None:
+        if self.budget:
+            self.flight -= tokens
+
+    async def leave(self, tokens: int, admitted_at: int) -> None:
+        """A text is done with what is left of its reservation."""
         if self.budget:
             async with self.changed:
-                self.flying -= 1
-                self.held -= reserved
+                self.held, self.flying = self.held - tokens, self.flying - 1
+                if self.rises == admitted_at:
+                    self.window = min(2 * self.window, self.width)
                 self.changed.notify_all()
 
 
@@ -109,7 +165,9 @@ class Placer:
         self.per_item, self.se_target, self.seed, self.max_chars = int(per_item), se_target, int(seed), int(max_chars)
         self.scores = np.array([a.score for a in scale.anchors])     # highest first, as the scale keeps them
         self.known = {a.text: a for a in scale.anchors}
-        self.purse, self.sem = _Purse(budget), asyncio.Semaphore(concurrency)
+        self.purse, self.sem = _Purse(budget, concurrency), asyncio.Semaphore(concurrency)
+        self.longest = max((a.text for a in scale.anchors), key=len)
+        self.planned = min(self.per_item, 2 * len(scale.anchors))     # an anchor is met twice at most
         self.asked = self.rounds = self.unverified = 0
         self.errors: list[str] = []
         self.fatal: str | None = None
@@ -122,16 +180,34 @@ class Placer:
     def halted(self) -> bool:
         return bool(self.fatal) or self.purse.over
 
-    async def _compare(self, shown: str, a: int, leads: bool) -> float | None:
-        anchor = self.scale.anchors[a].text
+    async def _ask(self, state: dict, tokens: int, origin: dict) -> dict | None:
+        """One request, if the budget has room for it beside those already in the air. None when it does not."""
+        if not self.purse.take(tokens):
+            return None
+        try:
+            return await self.jev.ask(state, {"q": self.scale.question}, provenance=origin,
+                                      on_cost=lambda cost: self.purse.charge(cost, tokens))
+        finally:
+            self.purse.give(tokens)
+
+    def _state(self, shown: str, anchor: str, leads: bool) -> dict:
+        return {"A": shown, "B": anchor} if leads else {"A": anchor, "B": shown}
+
+    async def _compare(self, state: dict, tokens: int) -> float | None:
         async with self.sem:
-            reserved = await self.purse.admit(lambda: self.halted)
-            if reserved is None:
+            if self.fatal:
                 return None
             try:
-                state = {"A": shown, "B": anchor} if leads else {"A": anchor, "B": shown}
                 origin: dict = {}
-                answer = await self.jev.ask(state, {"q": self.scale.question}, on_cost=self.purse.charge, provenance=origin)
+                answer = None
+                if self.purse.budget and not self.purse.rate:
+                    async with self.purse.probe:        # until a charge has been seen, one request at a time
+                        if not self.purse.rate:
+                            answer = await self._ask(state, tokens, origin)
+                if answer is None:                      # priced only now, by what the probe cost, not when it queued
+                    answer = await self._ask(state, tokens, origin)
+                if answer is None:
+                    return None
                 origin = origin.get("q") or {}
                 # Each answer is checked, the cached ones too: the cache keys on the ID asked for, not on who replied.
                 if not self.any_model and not self.scale.check_answer(origin.get("resolved_model"), origin.get("source", "api")):
@@ -141,8 +217,6 @@ class Placer:
                 self.errors.append(str(e))
             except (JevFatal, ScaleError) as e:
                 self.fatal = self.fatal or str(e)
-            finally:
-                await self.purse.release(reserved)
         return None
 
     def _spread(self, size: int, rng: np.random.Generator) -> list[int]:
@@ -156,34 +230,49 @@ class Placer:
         open_.sort(key=lambda a: (len(met.get(a, ())), abs(self.scores[a] - estimate), a))
         return open_[:size]
 
-    async def place(self, text: str) -> tuple[float, float, int, int]:
-        """(score, standard error, comparisons, beyond) for one text. An unplaced text has a score of nan."""
+    async def place(self, text: str) -> tuple[float, float, int, int, bool]:
+        """(score, standard error, comparisons, beyond, partial) for one text. An unplaced text has a score of nan."""
+        nowhere = (math.nan, math.nan, 0, 0, False)
         shown = text[:self.max_chars]
         if not shown.strip() or self.halted:
-            return math.nan, math.nan, 0, 0
+            return nowhere
         if shown in self.known:    # an anchor is where the scale says it is, and comparing a text with itself says nothing
             anchor = self.known[shown]
-            return anchor.score, anchor.se, anchor.comparisons, 0
+            return anchor.score, anchor.se, anchor.comparisons, 0, False
 
+        # Room for every comparison the text may ask for, each priced as if it met the longest anchor.
+        reserve = self.planned * _tokens(self.jev.model, self._state(shown, self.longest, True), self.scale.question)
+        admitted_at = await self.purse.admit(reserve, lambda: self.halted)
+        if admitted_at is None:
+            return nowhere
+        try:
+            return await self._place(shown)
+        finally:
+            await self.purse.leave(reserve, admitted_at)
+
+    async def _place(self, shown: str) -> tuple[float, float, int, int, bool]:
         digest = hashlib.sha256(shown.encode("utf-8", "surrogatepass")).digest()
         rng = np.random.default_rng([self.seed, int.from_bytes(digest[:8], "big")])
         leads = bool(rng.integers(2))      # positions alternate from a random start, so the lean has both to work with
         met: dict[int, list[bool]] = {}
         against, led, ys = [], [], []
-        estimate, se = 0.0, math.nan
+        estimate, se, planned = 0.0, math.nan, 0
         sizes = [self.per_item // ROUNDS + (r < self.per_item % ROUNDS) for r in range(ROUNDS)]
         for r, size in enumerate(s for s in sizes if s):
             picks = self._spread(size, rng) if r == 0 else self._nearest(estimate, size, met)
-            if not picks or self.halted:
+            if not picks:
                 break
+            planned += len(picks)
             asks = []
             for a in picks:
                 position = (not met[a][0]) if a in met else leads
                 leads = not leads
                 met.setdefault(a, []).append(position)
-                asks.append((a, position))
+                state = self._state(shown, self.scale.anchors[a].text, position)
+                asks.append((a, position, state, _tokens(self.jev.model, state, self.scale.question)))
             self.rounds = max(self.rounds, r + 1)
-            for (a, position), y in zip(asks, await asyncio.gather(*(self._compare(shown, a, p) for a, p in asks))):
+            answers = [] if self.fatal else await asyncio.gather(*(self._compare(ask[2], ask[3]) for ask in asks))
+            for (a, position, _, _), y in zip(asks, answers):
                 if y is not None:
                     against.append(self.scores[a])
                     led.append(position)
@@ -191,13 +280,17 @@ class Placer:
                     self.asked += 1
             if ys:
                 estimate, se = locate(against, led, ys, self.scale.gamma, start=estimate)
+            if self.fatal or (self.purse.over and len(answers) > sum(y is not None for y in answers)):
+                planned += sum(sizes[r + 1:])          # cut short: the rounds that will not be asked were planned too
+                break
             # The first round's answers are mostly lopsided and few, so its standard error is not one to stop on.
             if self.se_target is not None and r >= 1 and ys and se <= self.se_target:
+                planned = len(ys)
                 break
         if not ys:
-            return math.nan, math.nan, 0, 0
+            return math.nan, math.nan, 0, 0, False
         low, high = self.scale.span
-        return estimate, se, len(ys), int(estimate > high) - int(estimate < low)
+        return estimate, se, len(ys), int(estimate > high) - int(estimate < low), len(ys) < min(planned, self.planned)
 
 
 async def aplace(texts: list[str], scale: Scale | str | os.PathLike, jev: Jev, *, concurrency: int = 32,
@@ -229,12 +322,12 @@ async def aplace(texts: list[str], scale: Scale | str | os.PathLike, jev: Jev, *
     return collect(results, scale, placer)
 
 
-def collect(results: list[tuple[float, float, int, int]], scale: Scale, placer: Placer | None = None) -> Placement:
-    """One Placement from each text's (score, se, comparisons, beyond). Without a placer, nothing had to be asked."""
-    columns = list(zip(*results)) or [(), (), (), ()]
+def collect(results: list[tuple[float, float, int, int, bool]], scale: Scale, placer: Placer | None = None) -> Placement:
+    """One Placement from each text's (score, se, comparisons, beyond, partial). Without a placer, nothing had to be asked."""
+    columns = list(zip(*results)) or [(), (), (), (), ()]
     out = Placement(np.array(columns[0], dtype=float), np.array(columns[1], dtype=float),
                     np.array(columns[2], dtype=int), lean=float(scale.fit.get("lean") or 0.0), gamma=scale.gamma,
-                    beyond=np.array(columns[3], dtype=int))
+                    beyond=np.array(columns[3], dtype=int), partial=np.array(columns[4], dtype=bool))
     if placer is not None:
         out.asked, out.rounds, out.errors, out.unverified = placer.asked, placer.rounds, placer.errors, placer.unverified
         out.over_budget, out.fatal = placer.over_budget, placer.fatal

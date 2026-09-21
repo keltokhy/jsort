@@ -43,8 +43,10 @@ class Oracle:
         e = np.random.default_rng(zlib.crc32(f"{a}|{b}".encode())).standard_normal() * self.quirk
         p = 1 / (1 + math.exp(-(value(a) - value(b) - 0.1 + e)))
         answers = {qid: {"type": "noul", "noul": p} for qid in body["questions"]}
+        cost = self.cost(len(self.bodies)) if callable(self.cost) else self.cost     # a price may change as the run goes on
+        self.spent = getattr(self, "spent", 0.0) + cost
         return httpx.Response(200, json={"model": self.model, "answers": answers,
-                                         "usage": {"input_tokens": 300, "output_tokens": 1, "cost": self.cost}})
+                                         "usage": {"input_tokens": 300, "output_tokens": 1, "cost": cost}})
 
 
 @pytest.fixture(autouse=True)
@@ -254,7 +256,8 @@ def test_keep_order_holds_the_input_order_and_unordered_does_not(tmp_path, scale
     held = write(tmp_path, "held.txt", "\n".join(apart) + "\n")
     _, out, _, _ = run(["--scale", scale, held, "--keep-order"], gate=slow_first)
     assert out.splitlines() == apart and apart != by_latent
-    _, out, _, _ = run(["--scale", scale, held, "--unordered", "--no-cache"], gate=slow_first)
+    # (No budget here: under one, the first text goes alone until its price is known, so it would also finish first.)
+    _, out, _, _ = run(["--scale", scale, held, "--unordered", "--no-cache", "--budget", "0"], gate=slow_first)
     assert sorted(out.splitlines()) == sorted(apart) and out.splitlines()[-1] == HELD[0]
     _, out, _, _ = run(["--scale", scale, held])             # neither: a sort, which has to wait for the end
     assert out.splitlines() == by_latent
@@ -414,7 +417,7 @@ def test_csv_and_jsonl_gain_a_beyond_field(tmp_path, scale):
     for extra in (["--keep-order"], []):
         code, out, _, _ = run(["--scale", scale, f, "--csv", "--field", "note", "-o", "--name", "hawk", *extra])
         got = list(csv.DictReader(io.StringIO(out)))
-        assert code == 0 and list(got[0]) == ["id", "note", "hawk_score", "hawk_se", "hawk_n", "hawk_beyond"]
+        assert code == 0 and list(got[0]) == ["id", "note", "hawk_score", "hawk_se", "hawk_n", "hawk_beyond", "hawk_partial"]
         assert {r["id"]: r["hawk_beyond"] for r in got} == {"0": "", "1": "", "2": "", "3": "", "4": "above"}
         assert [r["id"] for r in got] == (["0", "1", "2", "3", "4"] if extra else
                                           [r["id"] for r in sorted(got, key=lambda r: -float(r["hawk_score"]))])
@@ -423,13 +426,14 @@ def test_csv_and_jsonl_gain_a_beyond_field(tmp_path, scale):
         code, out, err, oracle = run(["--scale", scale, clash, "--csv", "--field", "note", "-o", *extra])
         assert (code, out, oracle.bodies) == (2, "", []) and "jsort_beyond" in err and "--name" in err
     assert run(["--scale", scale, write(tmp_path, "e.csv", "id,note\n"), "--csv", "--field", "note", "-o", "--keep-order"])[:2] \
-        == (0, "id,note,jsort_score,jsort_se,jsort_n,jsort_beyond\n")
+        == (0, "id,note,jsort_score,jsort_se,jsort_n,jsort_beyond,jsort_partial\n")
 
     j = write(tmp_path, "new.jsonl", "".join(json.dumps(r) + "\n" for r in rows) + "not json\n")
     code, out, err, _ = run(["--scale", scale, j, "--jsonl", "--field", "note", "-o", "--keep-order"])
     got = [json.loads(l) for l in out.splitlines()]
     assert code == 2 and "not valid JSON" in err and [g["id"] for g in got] == ["0", "1", "2", "3", "4"]
     assert got[4]["jsort_beyond"] == "above" and got[0]["jsort_beyond"] is None and got[0]["jsort_n"] == 10
+    assert got[0]["jsort_partial"] is False
 
 
 def test_max_chars_comes_from_the_scale(tmp_path):
@@ -446,20 +450,25 @@ def test_max_chars_comes_from_the_scale(tmp_path):
     assert "the scale was built showing Jev the first 12 characters of a text; this run shows 20" in err
 
 
-def test_the_budget_stops_placement_and_prints_what_it_has(tmp_path, scale):
+def test_the_budget_stops_placement_between_texts(tmp_path, scale):
     held = write(tmp_path, "held.txt", "\n".join(HELD[:10]) + "\n")
-    code, out, err, oracle = run(["--scale", scale, held, "--budget", "0.012", "-j", "1", "-o"], cost=0.001)
-    assert code == 2 and "budget" in err and "placed on those" in err and len(oracle.bodies) == 12
-    assert sorted(l.split("\t")[2] for l in out.splitlines()) == sorted(HELD[:10]) and "could not be placed" in err
-    code, out, err, oracle = run(["--scale", scale, held, "--budget", "0.012", "-j", "1", "-o", "--keep-order", "--no-cache"],
-                                 cost=0.001)
-    assert code == 2 and "budget" in err and len(oracle.bodies) == 12
-    assert [l.split("\t")[2] for l in out.splitlines()] == HELD[:len(out.splitlines())] and out.splitlines()[0][0] != "\t"
+    for extra in ([], ["--keep-order", "--no-cache"]):
+        code, out, err, oracle = run(["--scale", scale, held, "--budget", "0.025", "-o", *extra], cost=0.001)
+        # Two texts at ten comparisons each fit in the budget and a third does not, so the third is not begun.
+        assert code == 2 and len(oracle.bodies) == 20 and oracle.spent <= 0.025
+        assert "budget" in err and "in full or not at all" in err
+        rows = [l.split("\t") for l in out.splitlines()]
+        scored = [r[2] for r in rows if r[0]]
+        assert sorted(scored) == sorted(HELD[:2]) and "fewer comparisons" not in err
+        if extra:
+            assert [r[2] for r in rows] == HELD[:len(rows)] and 2 <= len(rows) <= 10    # a stream stops reading at the budget
+        else:
+            assert sorted(r[2] for r in rows) == sorted(HELD[:10]) and "8 texts could not be placed" in err
 
 
 def test_concurrent_placement_respects_the_remaining_budget(scale):
-    async def go(budget):
-        oracle = Oracle(cost=0.01)
+    async def go(budget, cost=0.01):
+        oracle = Oracle(cost=cost)
         jev = Jev("test-key", transport=httpx.MockTransport(oracle))
         try:
             result = await aplace(HELD[:10], scale, jev, budget=budget, any_model=True)
@@ -467,8 +476,12 @@ def test_concurrent_placement_respects_the_remaining_budget(scale):
         finally:
             await jev.close()
 
-    result, calls, spent = asyncio.run(go(0.03))
-    assert result.over_budget and result.asked == calls == 3 and spent == pytest.approx(0.03)
+    # The first reply shows that the budget does not cover the rest of the first text. It is cut short and says so.
+    result, calls, spent = asyncio.run(go(0.035))
+    assert result.over_budget and result.asked == calls and spent <= 0.035 and calls >= 1
+    assert list(result.partial) == [True] + [False] * 9 and np.isnan(result.score[1:]).all()
+    result, calls, spent = asyncio.run(go(0.25))
+    assert result.over_budget and result.asked == calls == 20 and spent == pytest.approx(0.20) and not result.partial.any()
     result, calls, spent = asyncio.run(go(0))
     assert not result.over_budget and result.asked == calls == 100
 
@@ -609,3 +622,62 @@ def test_a_cached_answer_from_another_model_is_caught_without_a_call(tmp_path, s
     code, out, err, oracle = run(["--scale", scale, held, "-o"])
     assert code == 0 and oracle.bodies == [] and out.count("\n") == 1
     assert "10 of the 10 answers did not say which model gave them" in err
+
+
+# ---- The budget: what a placement costs is reserved before it starts ------------------------------------------------
+
+def test_a_price_rise_does_not_overshoot_the_budget_by_a_wave_of_calls(tmp_path, scale):
+    held = write(tmp_path, "held.txt", "\n".join(HELD[:40]) + "\n")
+    # One cheap reply, then every reply ten times dearer: a probe says nothing about what follows it.
+    for extra in ([], ["--keep-order"], ["--unordered"]):
+        code, _, err, oracle = run(["--scale", scale, held, "--budget", "0.05", "-j", "32", "--no-cache", *extra],
+                                   cost=lambda n: 0.001 if n == 1 else 0.01)
+        assert code == 2 and "budget" in err
+        assert oracle.spent <= 0.05, (extra, oracle.spent)          # it was $0.311 when the dearest reply so far was the reserve
+    # A rise once the run is at full width can only cost the calls already in the air, 32 of them at most here.
+    code, _, _, oracle = run(["--scale", scale, held, "--budget", "0.05", "-j", "32", "--no-cache"],
+                             cost=lambda n: 0.0001 if n <= 150 else 0.001)
+    assert code == 2 and oracle.spent <= 0.05 + 32 * 0.001
+
+
+def test_a_text_is_placed_in_full_or_not_at_all_when_the_budget_runs_out(tmp_path, scale):
+    one = write(tmp_path, "one.txt", HELD[0] + "\n")
+    two = write(tmp_path, "two.txt", HELD[0] + "\n" + HELD[1] + "\n")
+    _, alone, _, _ = run(["--scale", scale, one, "--json", "--budget", "0.105", "--no-cache"], cost=0.01)
+    (alone,) = placed(alone).values()
+    assert alone["comparisons"] == 10 and alone["partial"] is False
+    for extra in ([], ["--keep-order"]):
+        code, out, err, oracle = run(["--scale", scale, two, "--json", "--budget", "0.105", "-j", "2", "--no-cache", *extra], cost=0.01)
+        got = placed(out)
+        # The budget reaches one text. It gets all its comparisons and the score it has alone; the other gets none.
+        assert {k: got[HELD[0]][k] for k in ("score", "se", "comparisons", "partial")} == \
+               {k: alone[k] for k in ("score", "se", "comparisons", "partial")}
+        assert got[HELD[1]]["score"] is None and got[HELD[1]]["comparisons"] == 0 and got[HELD[1]]["partial"] is None
+        assert code == 2 and len(oracle.bodies) == 10 and "1 texts could not be placed" in err and "budget" in err
+
+
+def test_a_placement_cut_short_is_flagged(tmp_path, scale):
+    async def one_fails(body):
+        if HELD[1] in body["state"].values() and not failed:
+            failed.append(1)
+            raise httpx.ConnectError("scripted failure")
+
+    held = write(tmp_path, "held.txt", "\n".join(HELD[:3]) + "\n")
+    for extra in ([], ["--keep-order"]):
+        failed = []
+        code, out, err, _ = run(["--scale", scale, held, "--json", "--no-cache", "--timeout", "0.05", *extra], gate=one_fails)
+        got = placed(out)
+        assert code == 2 and [got[t]["partial"] for t in HELD[:3]] == [False, True, False]
+        assert got[HELD[1]]["comparisons"] == 9 and got[HELD[1]]["score"] is not None
+        assert "1 texts were placed on fewer comparisons than -k asked for" in err
+    failed = []
+    rows = write(tmp_path, "held.csv", "note\n" + "\n".join(HELD[:3]) + "\n")
+    _, out, _, _ = run(["--scale", scale, rows, "--csv", "--field", "note", "-o", "--keep-order", "--no-cache", "--timeout", "0.05"],
+                       gate=one_fails)
+    got = list(csv.DictReader(io.StringIO(out)))
+    assert list(got[0])[-2:] == ["jsort_beyond", "jsort_partial"] and [r["jsort_partial"] for r in got] == ["0", "1", "0"]
+    # Too few anchors to give -k comparisons is the scale's doing, not a placement cut short.
+    few = str(tmp_path / "few.json")
+    run([DESCRIPTION, str(tmp_path / "base.txt"), "--save-scale", few, "--anchors", "3"])
+    _, out, err, _ = run(["--scale", few, held, "--json", "--no-cache"])
+    assert {(o["comparisons"], o["partial"]) for o in placed(out).values()} == {(6, False)} and "fewer comparisons" not in err

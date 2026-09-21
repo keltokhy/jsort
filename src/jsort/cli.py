@@ -118,8 +118,9 @@ class Writer:
 
     def __init__(self, args, out, placing: bool = False):
         self.args, self.out, self.placing = args, out, placing
-        # A placed text also says whether it fell beyond the scale's anchors, where its score is an extrapolation.
-        self.fields = [f"{args.name}_{s}" for s in ("score", "se", "n") + (("beyond",) if placing else ())]
+        # A placed text also says whether it fell beyond the scale's anchors, where its score is an extrapolation,
+        # and whether it was placed on fewer comparisons than planned, where it is not the score a full placement gives.
+        self.fields = [f"{args.name}_{s}" for s in ("score", "se", "n") + (("beyond", "partial") if placing else ())]
         self.header: list[str] | None = None
         self.rows = csv.writer(out, lineterminator="\n") if args.csv and not args.json else None
 
@@ -132,14 +133,15 @@ class Writer:
         if self.rows is not None:
             self.rows.writerow((header or []) + (self.fields if self.args.score else []))
 
-    def text(self, rec: Record, rank: int | None, score: float, se: float, n: int, beyond: int = 0) -> None:
+    def text(self, rec: Record, rank: int | None, score: float, se: float, n: int, beyond: int = 0,
+             partial: bool = False) -> None:
         args, unscored = self.args, math.isnan(score)
         s = dict(zip(self.fields, (None if unscored else round(float(score), 4), None if unscored else round(float(se), 4),
-                                   int(n), {1: "above", -1: "below"}.get(int(beyond)))))
+                                   int(n), {1: "above", -1: "below"}.get(int(beyond)), None if unscored else bool(partial))))
         if args.json:
             obj = {"rank": rank, "score": s[self.fields[0]], "se": s[self.fields[1]], "comparisons": s[self.fields[2]]}
             if self.placing:
-                obj["beyond"] = s[self.fields[3]]
+                obj["beyond"], obj["partial"] = s[self.fields[3]], s[self.fields[4]]
             obj |= {"file": rec.file, "line": rec.lineno}
             if not args.whole:
                 obj["text"] = rec.text if args.csv else rec.original
@@ -149,7 +151,7 @@ class Writer:
         elif args.csv:
             row = ["" if rec.data.get(h) is None else rec.data[h] for h in self.header or []]
             if args.score:
-                row += ["" if v is None else v for v in s.values()]
+                row += ["" if v is None else int(v) if isinstance(v, bool) else v for v in s.values()]
             # A row longer than the header keeps its surplus values, after the named columns.
             self.rows.writerow(row + list(rec.data.get(None) or []))
         else:
@@ -170,7 +172,7 @@ def write(records: list[Record], header: list[str] | None, ranking: Ranking, ord
     writer.start(header)
     for i in order:
         writer.text(records[i], ranks.get(i), ranking.score[i], ranking.se[i], ranking.comparisons[i],
-                    ranking.beyond[i] if placing else 0)
+                    ranking.beyond[i] if placing else 0, bool(ranking.partial[i]) if placing else False)
     out.flush()
 
 
@@ -184,7 +186,7 @@ def summary(records: list[Record], ranking: Ranking, jev: Jev) -> str:
 
 
 def closing_notes(args, scale: Scale | None, *, truncated: int, ragged: int, over_budget: bool, asked: int,
-                  unscored: int, beyond: tuple[int, int], unverified: int = 0, err) -> None:
+                  unscored: int, beyond: tuple[int, int], unverified: int = 0, partial: int = 0, err) -> None:
     """What the user should know about the run, after the output: the same lines whether it sorted or placed."""
     if ragged:
         print(f"jsort: {ragged:,} rows have more values than the header has columns; the surplus is kept at the end "
@@ -192,13 +194,20 @@ def closing_notes(args, scale: Scale | None, *, truncated: int, ragged: int, ove
     if truncated:
         print(f"jsort: compared only the first {args.max_chars:,} characters of {truncated:,} texts; raise --max-chars",
               file=err)
-    if over_budget:
-        print(f"jsort: stopped asking at the ${args.budget:.2f} budget after {asked:,} comparisons and "
-              f"{'placed' if scale else 'sorted'} on those; raise it with --budget, and the answers so far come back "
-              "from the cache", file=err)
+    if over_budget and scale:
+        print(f"jsort: stopped at the ${args.budget:.2f} budget after {asked:,} comparisons: it does not cover another "
+              "text's placement in full, and a text is placed in full or not at all; raise it with --budget, and the "
+              "answers so far come back from the cache", file=err)
+    elif over_budget:
+        print(f"jsort: stopped asking at the ${args.budget:.2f} budget after {asked:,} comparisons and sorted on those; "
+              "raise it with --budget, and the answers so far come back from the cache", file=err)
     if unscored:
         print(f"jsort: {unscored:,} texts " + ("could not be placed and have no score" if scale else
                                                "were never compared and are listed last"), file=err)
+    if partial:
+        print(f"jsort: {partial:,} texts were placed on fewer comparisons than -k asked for, because a comparison failed "
+              "or the run stopped while they were being placed; their scores are not the ones a full placement gives "
+              "(partial in --json, NAME_partial with -o on CSV and JSONL)", file=err)
     if unverified:
         print(f"jsort: {unverified:,} of the {asked:,} answers did not say which model gave them (cache entries written "
               f"before jsort recorded it, or an API that does not name its model), so they could not be checked against "
@@ -349,8 +358,8 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
 
     if work is None and placing:
         known = {a.text: a for a in scale.anchors}
-        ranking = collect([(known[t].score, known[t].se, known[t].comparisons, 0) if t in known
-                           else (math.nan, math.nan, 0, 0) for t in shown], scale)
+        ranking = collect([(known[t].score, known[t].se, known[t].comparisons, 0, False) if t in known
+                           else (math.nan, math.nan, 0, 0, False) for t in shown], scale)
     elif work is None:
         ranking = Ranking.unscored(len(texts))
     else:
@@ -404,7 +413,8 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     closing_notes(args, scale, truncated=truncated, ragged=sum(1 for r in records if r.data.get(None)) if args.csv else 0,
                   over_budget=ranking.over_budget, asked=ranking.asked,
                   unscored=unscored if jev is not None or placing else 0, beyond=beyond,
-                  unverified=ranking.unverified if placing else 0, err=err)
+                  unverified=ranking.unverified if placing else 0,
+                  partial=int(ranking.partial.sum()) if placing else 0, err=err)
     if ranking.reliability is not None and ranking.reliability < SHAKY:
         print(f"jsort: reliability {ranking.reliability:.2f}: two halves of the comparisons give different orders. "
               "Raise -k, or reword the description so that any two of these texts can be compared on it", file=err)
@@ -429,7 +439,7 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
     writer = Writer(args, out, placing=True)
     known = {a.text: a for a in scale.anchors}
     s = {"next": 0, "seen": 0, "problems": 0, "fatal": None, "broken_pipe": False, "truncated": 0, "ragged": 0,
-         "unscored": 0, "above": 0, "below": 0, "jev": None, "placer": None}
+         "unscored": 0, "above": 0, "below": 0, "partial": 0, "jev": None, "placer": None}
     t0 = time.perf_counter()
 
     def complain(message: str) -> None:
@@ -478,8 +488,13 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
                     except (CancelledError, RuntimeError):
                         pass
 
-        def emit(rec: Record, score: float, se: float, n: int, beyond: int) -> None:
+        def emit(rec: Record, score: float, se: float, n: int, beyond: int, partial: bool) -> None:
             s["seen"] += 1
+            if partial:
+                s["partial"] += 1
+                if s["partial"] <= MAX_ERRORS_SHOWN:
+                    print(f"jsort: {rec.file}:{rec.lineno}: placed on {n:,} comparisons, fewer than -k asked for; its score "
+                          "is not the one a full placement gives", file=err)
             s["unscored"] += math.isnan(score) and bool(rec.text[:args.max_chars].strip())
             if beyond:
                 s["above" if beyond > 0 else "below"] += 1
@@ -489,7 +504,7 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
                           if beyond > 0 else f"below every anchor (the lowest is {_number(low, 2)})")
                           + f"; its score of {_number(score, 2)} is an extrapolation", file=err)
             try:
-                writer.text(rec, None, score, se, n, beyond)
+                writer.text(rec, None, score, se, n, beyond, partial)
                 out.flush()
             except BrokenPipeError:
                 s["broken_pipe"] = True
@@ -507,10 +522,10 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
 
         async def judge(seq: int, rec: Record) -> None:
             s["truncated"] += len(rec.text) > args.max_chars
-            result, shown = (math.nan, math.nan, 0, 0), rec.text[:args.max_chars]
+            result, shown = (math.nan, math.nan, 0, 0, False), rec.text[:args.max_chars]
             try:
                 if shown in known:              # an anchor's score is in the file
-                    result = (known[shown].score, known[shown].se, known[shown].comparisons, 0)
+                    result = (known[shown].score, known[shown].se, known[shown].comparisons, 0, False)
                 elif shown.strip():
                     if s["placer"] is None:     # the first text worth asking about is what needs a key
                         s["jev"] = s["jev"] or client()
@@ -608,7 +623,7 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
         print(f"jsort: and {len(errors) - MAX_ERRORS_SHOWN:,} more failed comparisons", file=err)
     closing_notes(args, scale, truncated=s["truncated"], ragged=s["ragged"], over_budget=bool(placer and placer.over_budget),
                   asked=placer.asked if placer else 0, unscored=s["unscored"], beyond=(s["above"], s["below"]),
-                  unverified=placer.unverified if placer else 0, err=err)
+                  unverified=placer.unverified if placer else 0, partial=s["partial"], err=err)
     if show_stats and placer is not None:
         print(f"jsort: {s['seen']:,} texts placed against {len(scale.anchors):,} anchors, {placer.asked:,} comparisons; "
               f"{s['jev'].meter.summary()}; {time.perf_counter() - t0:.1f}s", file=err)
