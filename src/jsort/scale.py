@@ -27,6 +27,14 @@ SCHEMA_VERSION = 1
 DEFAULT_ANCHORS = 30
 
 
+UNITS = (None, "line", "para", "whole", "field")
+
+
+def question(description: str) -> dict:
+    """The question every comparison asks. A schema-1 scale holds exactly this for its description."""
+    return {"type": "noul", "instructions": f'Text A ranks higher than text B on this criterion: "{description}"'}
+
+
 class ScaleError(ValueError):
     """The scale cannot be used: unreadable, malformed, or built on another model's answers."""
 
@@ -54,6 +62,11 @@ class Scale:
     @property
     def gamma(self) -> float:
         return float(self.fit["gamma"])
+
+    @property
+    def ridge(self) -> float:
+        """The ridge the scale was fitted with. Placement uses it too, so a later change of default moves no score."""
+        return float(self.fit["ridge"])
 
     @property
     def max_chars(self) -> int:
@@ -113,15 +126,14 @@ class Scale:
         if version != SCHEMA_VERSION:
             raise ScaleError(f"scale schema {version!r} is not one this jsort reads (it reads {SCHEMA_VERSION}); "
                              "upgrade jsort or save the scale again")
-        description, question = data.get("description"), data.get("question")
+        description = data.get("description")
         if not isinstance(description, str) or not description.strip():
             raise ScaleError("the scale has no description")
-        if (not isinstance(question, dict) or question.get("type") != "noul"
-                or not isinstance(question.get("instructions"), str)):
-            raise ScaleError("the scale's question is not a noul with instructions")
-        if description not in question["instructions"]:
-            raise ScaleError("the scale's question does not contain its description; placement asks the question, "
-                             "so a description edited by hand would change nothing")
+        # Placement sends the saved question, so it has to be the one this description stands for and nothing else:
+        # a file whose question was edited would measure something its description does not say.
+        if data.get("question") != question(description):
+            raise ScaleError("the scale's question is not the one jsort asks for its description, "
+                             f"{question(description)['instructions']!r}; the file has been edited")
         model, inputs, fitted = data.get("model"), data.get("input"), data.get("fit")
         if not isinstance(model, dict) or not all(isinstance(model.get(k), str) and model[k]
                                                   for k in ("api", "endpoint", "requested")):
@@ -132,22 +144,44 @@ class Scale:
             raise ScaleError("the scale does not count its answers by the model that gave them")
         if not isinstance(inputs, dict) or not _whole(inputs.get("max_chars"), 1):
             raise ScaleError("the scale does not say how many characters of a text Jev was shown")
-        if not isinstance(fitted, dict) or not _finite(fitted.get("gamma")):
-            raise ScaleError("the scale does not record the first-position lean it was fitted with")
+        if inputs.get("unit") not in UNITS or not isinstance(inputs.get("field"), (str, type(None))):
+            raise ScaleError(f"the scale's unit is not one of {', '.join(u for u in UNITS if u)}, or its field is not a name")
+        if not isinstance(fitted, dict):
+            raise ScaleError("the scale has no summary of its fit")
+        gamma, lean, ridge = fitted.get("gamma"), fitted.get("lean"), fitted.get("ridge")
+        if (not _finite(gamma) or abs(gamma) > 10 or not _finite(lean)
+                or abs(lean - (1 / (1 + math.exp(-gamma)) - 0.5)) > 1e-4):
+            raise ScaleError("the scale's first-position lean is missing, not a number, or not the lean its gamma implies")
+        if not _finite(ridge) or not 0 < ridge <= 1:
+            raise ScaleError("the scale's ridge is not a number between 0 and 1")
+        if fitted.get("reliability") is not None and (not _finite(fitted["reliability"]) or not 0 <= fitted["reliability"] <= 1):
+            raise ScaleError("the scale's reliability is not a number from 0 to 1")
+        for name, minimum in (("texts", 2), ("eligible", 2), ("anchor_min_comparisons", 2), ("comparisons", 1),
+                              ("rounds", 1), ("per_item", 2), ("seed", 0), ("failed", 0)):
+            if not _whole(fitted.get(name), minimum):
+                raise ScaleError(f"the scale's {name} is not a whole number of at least {minimum}")
+        if not isinstance(fitted.get("over_budget"), bool):
+            raise ScaleError("the scale's over_budget is not true or false")
         rows = data.get("anchors")
         if not isinstance(rows, list) or len(rows) < 2:
             raise ScaleError("a scale needs at least two anchors")
         anchors = []
         for row in rows:
-            if (not isinstance(row, dict) or not isinstance(row.get("text"), str) or not row["text"].strip()
-                    or not _finite(row.get("score")) or not _finite(row.get("se")) or row["se"] < 0
-                    or not _whole(row.get("comparisons", 0), 0)):
-                raise ScaleError("an anchor needs a text, a finite score and a standard error")
-            anchors.append(Anchor(row["text"], float(row["score"]), float(row["se"]), int(row.get("comparisons", 0))))
+            if not isinstance(row, dict) or not isinstance(row.get("text"), str) or not row["text"].strip():
+                raise ScaleError("an anchor has no text")
+            if len(row["text"]) > inputs["max_chars"]:
+                raise ScaleError(f"an anchor is longer than the {inputs['max_chars']:,} characters the scale says Jev was shown")
+            if not _finite(row.get("score")) or abs(row["score"]) > 1000:
+                raise ScaleError("an anchor's score is not a number a scale in logits could hold")
+            if not _finite(row.get("se")) or row["se"] < 0:
+                raise ScaleError("an anchor's standard error is not a nonnegative number")
+            if not _whole(row.get("comparisons"), 1):
+                raise ScaleError("an anchor's comparisons is not a whole number of at least 1")
+            anchors.append(Anchor(row["text"], float(row["score"]), float(row["se"]), int(row["comparisons"])))
         if len({a.text for a in anchors}) != len(anchors):
             raise ScaleError("two anchors have the same text")
         anchors.sort(key=lambda a: -a.score)
-        return cls(description, question, model, inputs, fitted, tuple(anchors),
+        return cls(description, data["question"], model, inputs, fitted, tuple(anchors),
                    created=data.get("created"), jsort_version=data.get("jsort_version"))
 
     def check_model(self, api: str, endpoint: str, requested: str) -> None:

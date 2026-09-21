@@ -329,8 +329,8 @@ def test_a_scale_file_round_trips_and_a_bad_one_is_refused(tmp_path, scale):
         (lambda d: d.update(schema_version=2), "schema 2"),
         (lambda d: d.pop("schema_version"), "not a scale file"),
         (lambda d: d.update(anchors=d["anchors"][:1]), "at least two anchors"),
-        (lambda d: d["anchors"][0].update(score=float("nan")), "finite score"),
-        (lambda d: d.update(description="more dovish"), "does not contain its description"),
+        (lambda d: d["anchors"][0].update(score=float("nan")), "score is not a number"),
+        (lambda d: d.update(description="more dovish"), "question is not the one jsort asks"),
         (lambda d: d["fit"].pop("gamma"), "first-position lean"),
         (lambda d: d["model"].pop("endpoint"), "which api, endpoint and model"),
         (lambda d: d["input"].update(max_chars=0), "how many characters"),
@@ -721,3 +721,60 @@ def test_a_text_the_run_barely_measured_is_not_an_anchor(tmp_path):
         assert run(["x", base, "--save-scale", str(whole), "-k", k, "--no-cache"])[0] == 0
         fit = json.loads(whole.read_text())["fit"]
         assert fit["eligible"] == fit["texts"] == 90 and fit["anchor_min_comparisons"] == max(2, int(k) // 2)
+
+
+# ---- A scale file is checked as closely as it is trusted -----------------------------------------------------------
+
+def test_a_hand_edited_scale_is_refused(tmp_path, scale):
+    data = json.loads(open(scale).read())
+    held = write(tmp_path, "held.txt", HELD[0] + "\n")
+    nan = float("nan")
+    for damage, complaint in (
+        # The question is what Jev is asked. Reversing it while the description stays would measure the opposite.
+        (lambda d: d["question"].update(instructions=f'Text A ranks LOWER, not higher, on this criterion: "{DESCRIPTION}"'), "question"),
+        (lambda d: d["question"].update(extra="x"), "question"),
+        (lambda d: d["fit"].update(ridge="corrupt"), "ridge"),
+        (lambda d: d["fit"].update(ridge=0), "ridge"),
+        (lambda d: d["fit"].update(ridge=50), "ridge"),
+        (lambda d: d["fit"].update(lean=nan), "lean"),
+        (lambda d: d["fit"].update(lean=0.3), "lean"),                        # not the lean its gamma implies
+        (lambda d: d["fit"].update(gamma=nan), "lean"),
+        (lambda d: d["fit"].update(gamma=40), "lean"),
+        (lambda d: d["fit"].update(reliability=1.5), "reliability"),
+        (lambda d: d["fit"].update(reliability="high"), "reliability"),
+        (lambda d: d["fit"].update(comparisons=-3), "comparisons"),
+        (lambda d: d["fit"].update(per_item=1.5), "per_item"),
+        (lambda d: d["fit"].update(texts=True), "texts"),
+        (lambda d: d["fit"].update(over_budget="no"), "over_budget"),
+        (lambda d: d["anchors"][0].update(text="x" * (d["input"]["max_chars"] + 1)), "longer than"),
+        (lambda d: d["anchors"][0].update(se=-0.1), "standard error"),
+        (lambda d: d["anchors"][0].update(se=nan), "standard error"),
+        (lambda d: d["anchors"][0].update(score=1e9), "score"),
+        (lambda d: d["anchors"][0].update(comparisons=0), "comparisons"),
+        (lambda d: d["anchors"][1].update(text=d["anchors"][0]["text"]), "same text"),
+        (lambda d: d["input"].update(unit="chapter"), "unit"),
+        (lambda d: d["input"].update(max_chars=2.5), "how many characters"),
+        (lambda d: d["model"].update(unknown_answers=-1), "answers"),
+        (lambda d: d["model"].update(answered={"typesafe/jev-1.13": 0}), "answers"),
+        (lambda d: d["model"].update(answered="typesafe/jev-1.13"), "answers"),
+    ):
+        broken = json.loads(json.dumps(data))
+        damage(broken)
+        path = write(tmp_path, "broken.json", json.dumps(broken))
+        with pytest.raises(ScaleError, match=complaint):
+            Scale.load(path)
+        code, out, err, oracle = run(["--scale", path, held])
+        assert (code, out, oracle.bodies) == (2, "", []) and path in err, complaint
+    assert Scale.load(scale).question == jsort.scale.question(DESCRIPTION) == jsort.engine.question(DESCRIPTION)
+
+
+def test_placement_uses_the_ridge_the_scale_was_fitted_with(tmp_path, scale):
+    data = json.loads(open(scale).read())
+    assert data["fit"]["ridge"] == 0.01
+    stiff = json.loads(json.dumps(data))
+    stiff["fit"]["ridge"] = 0.5
+    stiff_path = write(tmp_path, "stiff.json", json.dumps(stiff))
+    held = write(tmp_path, "held.txt", "far beyond v=99\n")                 # certain answers: only the ridge holds it
+    as_fitted = placed(run(["--scale", scale, held, "--json"], quirk=0.0)[1])["far beyond v=99"]["score"]
+    stiffer = placed(run(["--scale", stiff_path, held, "--json"], quirk=0.0)[1])["far beyond v=99"]["score"]
+    assert stiffer < as_fitted - 0.5

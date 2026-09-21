@@ -12,15 +12,11 @@ import numpy as np
 
 from .core import Jev, JevError, JevFatal
 from .model import Fit, fit, information, reliability, shortfall, standard_errors
-from .scale import DEFAULT_ANCHORS, Scale, build, identity
+from .scale import DEFAULT_ANCHORS, Scale, build, identity, question  # noqa: F401  (question is part of this module's API)
 from .schedule import Schedule
 
 SETTLE = 3    # comparisons a text must have before --top may stop asking about it
 OUT = 4.0     # and how much worse the fit must get, in log-likelihood, were the text moved up into the top
-
-
-def question(description: str) -> dict:
-    return {"type": "noul", "instructions": f'Text A ranks higher than text B on this criterion: "{description}"'}
 
 
 @dataclass

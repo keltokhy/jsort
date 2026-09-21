@@ -276,7 +276,7 @@ class Placer:
                     ys.append(y)
                     self.asked += 1
             if ys:
-                estimate, se = locate(against, led, ys, self.scale.gamma, start=estimate)
+                estimate, se = locate(against, led, ys, self.scale.gamma, start=estimate, ridge=self.scale.ridge)
             if self.fatal or (self.purse.over and len(answers) > sum(y is not None for y in answers)):
                 planned += sum(sizes[r + 1:])          # cut short: the rounds that will not be asked were planned too
                 break
