@@ -307,7 +307,10 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         return 2
     if not records:
         if args.csv and header is not None and not args.json:
-            write([], header, Placement.unscored(0) if placing else Ranking.unscored(0), [], args, out)     # a header with no rows is still a CSV
+            try:
+                write([], header, Placement.unscored(0) if placing else Ranking.unscored(0), [], args, out)     # a header with no rows is still a CSV
+            except BrokenPipeError:
+                pass
         return 2 if problems else 0
 
     texts = [r.text for r in records]
@@ -573,7 +576,12 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
                     if clash := writer.clash(item):
                         s["fatal"] = f"the file already has a column named {clash}; choose another prefix with --name"
                         break
-                    writer.start(item)
+                    try:
+                        writer.start(item)
+                        out.flush()
+                    except BrokenPipeError:     # the header is output too: a reader that has gone ends the run quietly
+                        s["broken_pipe"] = True
+                        break
                     continue
                 if args.jsonl and isinstance(item.data, dict) and (clash := writer.clash(item.data)):
                     s["fatal"] = f"the records already have a field named {clash}; choose another prefix with --name"

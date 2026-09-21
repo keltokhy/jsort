@@ -778,3 +778,18 @@ def test_placement_uses_the_ridge_the_scale_was_fitted_with(tmp_path, scale):
     as_fitted = placed(run(["--scale", scale, held, "--json"], quirk=0.0)[1])["far beyond v=99"]["score"]
     stiffer = placed(run(["--scale", stiff_path, held, "--json"], quirk=0.0)[1])["far beyond v=99"]["score"]
     assert stiffer < as_fitted - 0.5
+
+
+def test_a_closed_pipe_ends_a_stream_quietly_even_before_the_first_row(tmp_path, scale):
+    class Closed(io.StringIO):
+        def write(self, s):
+            raise BrokenPipeError
+
+    empty = write(tmp_path, "empty.csv", "id,note\n")
+    rows = write(tmp_path, "rows.csv", "id,note\n1," + HELD[0] + "\n")
+    for f in (empty, rows):                  # the header is the first thing a CSV stream writes
+        for extra in (["--keep-order"], ["--unordered"], []):
+            code, _, err, oracle = run(["--scale", scale, f, "--csv", "--field", "note", "-o", *extra], out=Closed())
+            assert code == 0 and "Traceback" not in err
+            assert not extra or oracle.bodies == []          # a stream whose reader has gone asks nothing more
+    assert run(["x", empty, "--csv", "--field", "note"], out=Closed())[0] == 0      # an ordinary sort's header as well
