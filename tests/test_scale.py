@@ -684,3 +684,40 @@ def test_a_placement_cut_short_is_flagged(tmp_path, scale):
     run([DESCRIPTION, str(tmp_path / "base.txt"), "--save-scale", few, "--anchors", "3"])
     _, out, err, _ = run(["--scale", few, held, "--json", "--no-cache"])
     assert {(o["comparisons"], o["partial"]) for o in placed(out).values()} == {(6, False)} and "fewer comparisons" not in err
+
+
+# ---- What may become an anchor -------------------------------------------------------------------------------------
+
+def test_a_top_run_is_not_saved_as_a_scale(tmp_path):
+    base = write(tmp_path, "base.txt", "\n".join(BASE) + "\n")
+    path = tmp_path / "top.json"
+    code, out, err, oracle = run(["x", base, "--top", "5", "--save-scale", str(path)])
+    assert (code, out, oracle.bodies) == (2, "", []) and not path.exists()       # refused before anything is asked
+    assert "--top" in err and "stops asking" in err
+    r = jsort.rank(BASE, "x", top=5, transport=httpx.MockTransport(Oracle()))
+    with pytest.raises(ScaleError, match="top"):
+        r.scale()
+
+
+def test_a_text_the_run_barely_measured_is_not_an_anchor(tmp_path):
+    base = write(tmp_path, "base.txt", "\n".join(BASE) + "\n")
+    path = tmp_path / "cut.json"
+    # The budget stops this sort at 200 of its 450 comparisons: some texts have five comparisons, the rest four.
+    code, _, err, oracle = run(["x", base, "--save-scale", str(path), "--budget", "0.02"], cost=0.0001)
+    data = json.loads(path.read_text())
+    assert code == 2 and "budget" in err and len(oracle.bodies) < 450
+    assert data["fit"]["over_budget"] is True and data["fit"]["anchor_min_comparisons"] == 5
+    assert 2 <= data["fit"]["eligible"] < data["fit"]["texts"] == 90
+    assert min(a["comparisons"] for a in data["anchors"]) >= 5
+    assert f"{data['fit']['eligible']} of the 90 texts" in err and "5 comparisons" in err
+
+    # Stopped earlier still, no text has been measured well enough, and there is nothing to anchor a scale on.
+    early = tmp_path / "early.json"
+    code, _, err, _ = run(["x", base, "--save-scale", str(early), "--budget", "0.012", "--no-cache"], cost=0.0001)
+    assert code == 2 and not early.exists() and "5 comparisons" in err and "was not written" in err
+    # A complete sort leaves every text eligible, whatever -k is.
+    for k in ("2", "10"):
+        whole = tmp_path / f"whole{k}.json"
+        assert run(["x", base, "--save-scale", str(whole), "-k", k, "--no-cache"])[0] == 0
+        fit = json.loads(whole.read_text())["fit"]
+        assert fit["eligible"] == fit["texts"] == 90 and fit["anchor_min_comparisons"] == max(2, int(k) // 2)

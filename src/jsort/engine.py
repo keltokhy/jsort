@@ -186,7 +186,7 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
         out.gamma = float(fitted.gamma)
         out.reliability = reliability(n, first, second, ys, seed=seed)
         out.run = {"description": description, "question": q, "model": identity(jev, responders), "max_chars": max_chars,
-                   "per_item": per_item, "seed": seed, "texts": shown}
+                   "per_item": per_item, "seed": seed, "top": top, "texts": shown}
     return out
 
 

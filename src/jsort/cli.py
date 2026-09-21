@@ -266,6 +266,8 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         (not (args.top and args.keep_order), "--top and --keep-order cannot be combined"),
         (args.name.isidentifier(), "--name must be a plain word, since it becomes part of a column name"),
         (not (args.scale and args.save_scale), "--save-scale saves the scale a run fits, and a --scale run fits none"),
+        (not (args.top and args.save_scale), "--save-scale and --top cannot be combined: --top stops asking about texts "
+         "that are out of the running, which leaves the far end of the scale too poorly measured to anchor anything"),
         (args.anchors is None or bool(args.save_scale), "--anchors goes with --save-scale"),
         (args.anchors is None or args.anchors >= 2, "--anchors takes 2 or more"),
         (bool(args.scale) or not args.unordered, "--unordered goes with --scale"),
@@ -414,6 +416,10 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     if ranking.reliability is not None and ranking.reliability < SHAKY:
         print(f"jsort: reliability {ranking.reliability:.2f}: two halves of the comparisons give different orders. "
               "Raise -k, or reword the description so that any two of these texts can be compared on it", file=err)
+    if saved is not None and saved.fit["eligible"] < saved.fit["texts"]:
+        print(f"jsort: the run stopped early, so only {saved.fit['eligible']:,} of the {saved.fit['texts']:,} texts had the "
+              f"{saved.fit['anchor_min_comparisons']} comparisons an anchor needs; the scale in {args.save_scale} is anchored "
+              "on those, and ends where they end. Raise --budget and sort again for a scale of the whole run", file=err)
     if saved is not None and show_stats:
         print(f"jsort: saved {len(saved.anchors):,} anchors from {_number(saved.span[0], 2)} to "
               f"{_number(saved.span[1], 2)} in {args.save_scale}", file=err)

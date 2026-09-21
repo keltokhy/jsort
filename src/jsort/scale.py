@@ -250,6 +250,10 @@ def build(ranking, anchors: int = DEFAULT_ANCHORS, *, unit: str | None = None, f
     run = ranking.run
     if run is None:
         raise ScaleError("nothing was compared, so there is no scale to save")
+    if run.get("top") is not None:
+        raise ScaleError("a --top run stops asking about texts that are out of the running, so the far end of its "
+                         "scale rests on two or three comparisons, and a scale would keep that end as an anchor and "
+                         "treat it as exact. Sort without --top to save a scale")
     named, unknown = run["model"]["answered"], run["model"]["unknown_answers"]
     if len(named) > 1 and not any_model:
         raise ScaleError("the fit mixes answers from " + " and ".join(f"{m} ({n:,})" for m, n in sorted(named.items()))
@@ -265,15 +269,23 @@ def build(ranking, anchors: int = DEFAULT_ANCHORS, *, unit: str | None = None, f
     for i, text in enumerate(run["texts"]):   # identical texts share a score, so one of them stands for all
         if text.strip() and math.isfinite(ranking.score[i]) and math.isfinite(ranking.se[i]):
             first.setdefault(text, i)
-    index = list(first.values())
-    if len(index) < 2:
+    scored = len(first)
+    # Placement takes an anchor's score as exact, so a text the run barely measured cannot be one. A full sort gives
+    # every text about -k comparisons; one the budget or a refusal cut short may have left some with the opening two.
+    needed = max(2, int(run["per_item"]) // 2)
+    index = [i for i in first.values() if ranking.comparisons[i] >= needed]
+    if scored < 2:
         raise ScaleError("fewer than two texts were scored, so there is nothing to anchor a scale on")
+    if len(index) < 2:
+        raise ScaleError(f"the run stopped before two texts had the {needed} comparisons an anchor needs at -k "
+                         f"{run['per_item']}, so there is nothing to anchor a scale on; raise --budget and sort again")
     kept = [index[j] for j in choose([float(ranking.score[i]) for i in index],
                                      [float(ranking.se[i]) for i in index], int(anchors))]
     return Scale(
         description=run["description"], question=run["question"], model=run["model"],
         input={"max_chars": int(run["max_chars"]), "unit": unit, "field": field},
-        fit={"texts": len(index), "comparisons": int(ranking.asked), "rounds": int(ranking.rounds),
+        fit={"texts": scored, "eligible": len(index), "anchor_min_comparisons": needed,
+             "comparisons": int(ranking.asked), "rounds": int(ranking.rounds),
              "per_item": int(run["per_item"]), "seed": int(run["seed"]),
              "reliability": None if ranking.reliability is None else round(float(ranking.reliability), 4),
              "lean": round(float(ranking.lean), 6), "gamma": round(float(ranking.gamma), 6), "ridge": RIDGE,
