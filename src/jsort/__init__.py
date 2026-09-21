@@ -3,5 +3,7 @@
 __version__ = "0.1.3"
 
 from .engine import Ranking, arank, rank
+from .placement import Placement, aplace, place
+from .scale import Anchor, Scale, ScaleError
 
-__all__ = ["Ranking", "arank", "rank"]
+__all__ = ["Anchor", "Placement", "Ranking", "Scale", "ScaleError", "aplace", "arank", "place", "rank"]

@@ -12,6 +12,7 @@ import numpy as np
 
 from .core import Jev, JevError, JevFatal
 from .model import Fit, fit, information, reliability, shortfall, standard_errors
+from .scale import DEFAULT_ANCHORS, Scale, build, identity
 from .schedule import Schedule
 
 SETTLE = 3    # comparisons a text must have before --top may stop asking about it
@@ -35,6 +36,8 @@ class Ranking:
     errors: list[str] = field(default_factory=list)
     over_budget: bool = False
     fatal: str | None = None
+    gamma: float = 0.0             # the same lean in logits, as the model holds it; a saved scale places with it
+    run: dict | None = field(default=None, repr=False)   # what was asked, of whom, about which texts: what scale() saves
 
     @classmethod
     def unscored(cls, n: int) -> "Ranking":
@@ -45,6 +48,10 @@ class Ranking:
         scored = [i for i in range(len(self.score)) if not math.isnan(self.score[i])]
         scored.sort(key=lambda i: self.score[i] if reverse else -self.score[i])
         return scored + [i for i in range(len(self.score)) if math.isnan(self.score[i])]
+
+    def scale(self, anchors: int = DEFAULT_ANCHORS, *, unit: str | None = None, field: str | None = None) -> Scale:
+        """This run's scale, with `anchors` of its texts kept for placing later ones: `r.scale().save(path)`."""
+        return build(self, anchors, unit=unit, field=field)
 
 
 async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int = 10, top: int | None = None,
@@ -169,7 +176,10 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
             if m >= 0:
                 out.score[k], out.se[k], out.comparisons[k] = theta[m], se[m], compared[m]
         out.lean = float(1 / (1 + math.exp(-fitted.gamma)) - 0.5)
+        out.gamma = float(fitted.gamma)
         out.reliability = reliability(n, first, second, ys, seed=seed)
+        out.run = {"description": description, "question": q, "model": identity(jev), "max_chars": max_chars,
+                   "per_item": per_item, "seed": seed, "texts": shown}
     return out
 
 

@@ -18,6 +18,7 @@ import numpy as np
 from jsort.core import Meter
 from jsort.engine import arank
 from jsort.model import fit
+from jsort.placement import aplace
 
 
 class SimulatedJev:
@@ -78,5 +79,28 @@ async def main() -> None:
             rows.append((r.asked, len(found & set(np.argsort(-theta)[:10])) / 10))
         m = np.mean(np.array(rows, dtype=float), axis=0)
         print(f"{label:>8}: {m[0]:,.0f} questions, {m[1]:.2f} of the true top ten found")
+
+    # Placing on a saved scale. 200 texts are sorted at the default and the scale is saved; 100 the fit
+    # never saw are then placed against its anchors only. The target is the score a fit to every ordered
+    # pair of all 300 would give them, on the saved scale's zero.
+    base, held, reps = 200, 100, 8
+    texts = [str(i) for i in range(base + held)]
+    print(f"\nplacing {held} new texts on a scale saved from {base} (-k 10)\n")
+    print(f"{'anchors':>8} {'per item':>8} {'asked':>6} {'pearson':>8} {'rmse':>6} {'cover 95%':>9} {'beyond':>7}   the fit's own texts")
+    for anchors, per_item in ((15, 10), (30, 6), (30, 10), (30, 16), (60, 10)):
+        rows = []
+        for rep in range(reps):
+            theta = np.random.default_rng(100 + rep).normal(0, 1.5, base + held)
+            judge = SimulatedJev(theta)
+            goal = target(judge, base + held)
+            goal -= goal[:base].mean()
+            r = await arank(texts[:base], "x", judge, per_item=10, seed=rep)
+            p = await aplace(texts[base:], r.scale(anchors), judge, per_item=per_item, seed=rep, budget=0, any_model=True)
+            miss, fitted_miss = p.score - goal[base:], r.score - goal[:base]
+            rows.append((p.asked / held, float(np.corrcoef(p.score, goal[base:])[0, 1]), float(np.sqrt(np.mean(miss ** 2))),
+                         float(np.mean(np.abs(miss) <= 1.96 * p.se)), float(np.mean(p.beyond != 0)),
+                         float(np.sqrt(np.mean(fitted_miss ** 2))), float(np.mean(np.abs(fitted_miss) <= 1.96 * r.se))))
+        m = np.mean(np.array(rows, dtype=float), axis=0)
+        print(f"{anchors:>8} {per_item:>8} {m[0]:>6.1f} {m[1]:>8.3f} {m[2]:>6.3f} {m[3]:>9.2f} {m[4]:>7.2f}   rmse {m[5]:.3f}, cover {m[6]:.2f}")
 
 asyncio.run(main())
