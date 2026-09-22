@@ -1,32 +1,65 @@
-name: publish
-# Push a tag like v0.1.0 to release. PyPI trusts this workflow directly (Trusted Publishing),
-# so there is no API token to store, leak or rotate.
+name: Test and publish
+# Every push and pull request runs the tests. A pushed tag like v0.1.0 also publishes to PyPI once the
+# tests pass. PyPI trusts this workflow file by name (Trusted Publishing), so there is no API token to
+# store, leak or rotate; keep the filename.
+
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
 defaults:
   run:
     working-directory: consumer
+
 jobs:
-  pypi:
+  test:
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-      contents: read
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: consumer
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: keltokhy/jevkit-core
           ref: v0.3.0
           path: jevkit-core
-      - uses: astral-sh/setup-uv@v5
-      - name: The tag must match the version in pyproject.toml
-        run: test "v$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" = "$GITHUB_REF_NAME"
-      - run: uv sync
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.9"
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
       - run: uv run pytest -q
-      - run: uv build
-      - run: uv publish
+      - run: uv build --no-sources
+      - run: uvx --from twine==7.0.0 twine check --strict dist/*
+
+  pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/jev-sort/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: consumer
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.9"
+          python-version: "3.13"
+      - name: Verify the release tag matches the package version
+        run: test "$GITHUB_REF_NAME" = "v$(uv version --short)"
+      - run: uv build --no-sources
+      - run: uv publish --trusted-publishing always
