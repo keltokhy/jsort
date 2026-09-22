@@ -9,7 +9,9 @@ import asyncio
 import itertools
 import statistics
 
-from jsort.core import Jev, resolve_backend
+from jevkit_runtime import Client, resolve
+
+from jsort.core import PROVIDERS
 
 ITEMS = [  # least to most urgent
     "No rush at all, just curious whether dark mode is planned someday.",
@@ -43,8 +45,7 @@ def p_first(answer: dict) -> float:
 
 
 async def main() -> None:
-    backend, key = resolve_backend()
-    jev = Jev(key, backend, cache=None)
+    jev = Client(resolve(PROVIDERS))
     pairs = list(itertools.permutations(range(len(ITEMS)), 2))
     sem = asyncio.Semaphore(16)
 
@@ -69,4 +70,5 @@ async def main() -> None:
     print(jev.meter.summary())
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

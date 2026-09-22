@@ -25,7 +25,9 @@ from pathlib import Path
 
 import numpy as np
 
-from jsort.core import Cache, Jev, resolve_backend
+from jevkit_runtime import AnswerStore, Client, resolve
+
+from jsort.core import PROVIDERS
 
 OUT = Path(__file__).parent / "out"
 SOURCE = "https://raw.githubusercontent.com/scrosseye/CLEAR-Corpus/main/CLEAR_corpus_final.xlsx"
@@ -76,8 +78,7 @@ def prepare() -> None:
 
 
 async def one_call_per_text(texts: list[str]) -> dict:
-    backend, key = resolve_backend()
-    jev = Jev(key, backend, cache=Cache())
+    jev = Client(resolve(PROVIDERS), store=AnswerStore())
     sem = asyncio.Semaphore(32)
 
     async def ask(t):

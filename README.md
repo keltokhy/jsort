@@ -403,6 +403,9 @@ measure can be expected to correlate with it above about 0.88.
 
 Two things to take from it.
 
+The same sample and setting were run on two local models on 2026-09-22: DiffusionGemma through OpenJev
+lands at r = 0.78 and Laya at chance; see [the three-model comparison](docs/three-models-2026-09-22.md).
+
 jsort gets most of the way to the ceiling from a two-word description. It beats every readability
 formula shipped with the corpus by a wide margin, and it beats the other thing you can do with two
 words, which is to ask for a probability per text and sort on that. That probability bunches up (73
