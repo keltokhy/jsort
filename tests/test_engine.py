@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from jsort.core import Jev
+from jsort.core import Backend, Jev
 from jsort.engine import arank
 
 
@@ -32,7 +32,7 @@ class ChargedEndpoint:
 
 def run(endpoint, **options):
     async def go():
-        jev = Jev("test-key", transport=httpx.MockTransport(endpoint))
+        jev = Jev(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(endpoint))
         try:
             result = await arank([str(i) for i in range(40)], "higher", jev, **options)
             return result, jev.meter.cost
@@ -76,7 +76,7 @@ def test_explicit_zero_budget_is_unlimited(monkeypatch):
 def test_budget_is_per_run_when_reusing_a_client():
     async def go():
         endpoint = ChargedEndpoint(0.01)
-        jev = Jev("test-key", transport=httpx.MockTransport(endpoint))
+        jev = Jev(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(endpoint))
         try:
             for _ in range(5):
                 result = await arank([str(i) for i in range(10)], "higher", jev, budget=0.02)
@@ -90,7 +90,7 @@ def test_budget_is_per_run_when_reusing_a_client():
 def test_concurrent_rankings_have_independent_budgets():
     async def go():
         endpoint = ChargedEndpoint(0.01)
-        jev = Jev("test-key", transport=httpx.MockTransport(endpoint))
+        jev = Jev(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(endpoint))
         try:
             results = await asyncio.gather(*(
                 arank([f"{prefix}{i}" for i in range(10)], "higher", jev, budget=0.02)
@@ -118,7 +118,7 @@ def test_invalid_ranking_options_fail_before_any_request(options):
 def test_zero_concurrency_raises_instead_of_hanging():
     async def go():
         endpoint = ChargedEndpoint(0.01)
-        jev = Jev("test-key", transport=httpx.MockTransport(endpoint))
+        jev = Jev(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(endpoint))
         try:
             with pytest.raises(ValueError, match="concurrency"):
                 await asyncio.wait_for(arank(["a", "b"], "higher", jev, concurrency=0), timeout=0.1)

@@ -206,9 +206,9 @@ def rank(texts: list[str], description: str, *, api: str | None = None, model: s
         raise ValueError("timeout must be finite and greater than 0")
 
     async def go() -> Ranking:
-        backend, key = resolve_backend(api)
-        jev = Jev(key, backend, model=model, timeout=timeout, concurrency=options.get("concurrency", 32),
-                  cache=Cache() if cache else None, transport=transport)
+        backend = resolve_backend(api, model=model)
+        jev = Jev(backend, timeout=timeout, concurrency=options.get("concurrency", 32),
+                  store=Cache() if cache else None, transport=transport)
         try:
             return await arank(texts, description, jev, **options)
         finally:

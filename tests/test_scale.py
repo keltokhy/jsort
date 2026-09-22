@@ -20,7 +20,7 @@ import pytest
 
 import jsort
 from jsort.cli import main
-from jsort.core import Jev
+from jsort.core import Backend, Jev
 from jsort.placement import aplace
 from jsort.scale import Scale, ScaleError, choose
 
@@ -477,7 +477,7 @@ def test_the_budget_stops_placement_between_texts(tmp_path, scale):
 def test_concurrent_placement_respects_the_remaining_budget(scale):
     async def go(budget, cost=0.01):
         oracle = Oracle(cost=cost)
-        jev = Jev("test-key", transport=httpx.MockTransport(oracle))
+        jev = Jev(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(oracle))
         try:
             result = await aplace(HELD[:10], scale, jev, budget=budget, any_model=True)
             return result, len(oracle.bodies), jev.meter.cost
@@ -565,14 +565,12 @@ def test_python_api(tmp_path):
 # ---- Who answered: the scale may only name a model it can vouch for ------------------------------------------------
 
 def forget_who_answered(tmp_path):
-    """Rewrite every cached answer the way jsort 0.1.3 and jgrep write them: the answers table only, a new time."""
+    """Strip every cached answer of who gave it, as an answer stored without provenance would be."""
     import sqlite3
     db = sqlite3.connect(tmp_path / "cache" / "jev" / "answers.sqlite", isolation_level=None)
-    rows = db.execute("SELECT key, answer FROM answers").fetchall()
-    for key, answer in rows:
-        db.execute("INSERT OR REPLACE INTO answers VALUES (?, ?, ?)", (key, answer, 1.0))
+    count = db.execute("UPDATE answers SET metadata = NULL, at = 1.0").rowcount
     db.close()
-    return len(rows)
+    return count
 
 
 def test_a_fit_that_mixes_two_models_is_not_saved_as_one(tmp_path):

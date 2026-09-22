@@ -25,7 +25,7 @@ import time
 from concurrent.futures import CancelledError
 
 from . import __version__
-from .core import BACKENDS, Cache, Jev, JevFatal, config_dir, resolve_backend
+from .core import PROVIDERS, Cache, Jev, JevFatal, Settings, resolve_backend
 from .engine import Ranking, arank
 from .inputs import Record, read, records as read_records
 from .placement import Placement, Placer, aplace, client_for, collect
@@ -51,7 +51,7 @@ def parser() -> argparse.ArgumentParser:
                '  tail -f captions.txt | jsort --scale hawkish.json -o --keep-order\n\n'
                "Jev is reached through TypeSafe's API (TYPESAFE_API_KEY), OpenRouter (OPENROUTER_API_KEY) or a\n"
                "System One gateway of your own (JEV_GATEWAY_URL and JEV_GATEWAY_API_KEY).\n"
-               f"Keys can also live in {config_dir()}/typesafe.key, openrouter.key or gateway.key.")
+               f"Keys can also live in {Settings.from_env().config_dir}/typesafe.key, openrouter.key or gateway.key.")
     ap.add_argument("args", nargs="*", help=argparse.SUPPRESS)
     ap.add_argument("-k", "--per-item", type=int, default=10, metavar="N",
                     help="comparisons each text takes part in (default 10); the run asks about half that many "
@@ -100,7 +100,7 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-chars", type=int, default=None, metavar="N",
                     help="show Jev only the first N characters of a text (default 8000; with --scale, the scale's)")
     ap.add_argument("--no-cache", action="store_true", help="do not read or write the answer cache")
-    ap.add_argument("--api", choices=list(BACKENDS), help="which API to call (default: whichever has a key)")
+    ap.add_argument("--api", choices=list(PROVIDERS), help="which API to call (default: whichever has a key)")
     ap.add_argument("--model", metavar="ID", help="model ID to request (default: the API's latest Jev)")
     ap.add_argument("--stats", action=argparse.BooleanOptionalAction, default=None,
                     help="print comparisons, reliability, tokens and cost to stderr at the end (default: when stderr is a terminal)")
@@ -294,9 +294,8 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
 
     def client() -> Jev:
         """The scale's API and model unless others were named. Made inside the running loop, where it is closed."""
-        backend, key, model = client_for(scale, args.api, args.model)
-        return Jev(key, backend, model=model, timeout=args.timeout, concurrency=args.concurrency,
-                   cache=None if args.no_cache else Cache(), transport=transport)
+        return Jev(client_for(scale, args.api, args.model), timeout=args.timeout, concurrency=args.concurrency,
+                   store=None if args.no_cache else Cache(), transport=transport)
 
     if scale and (args.keep_order or args.unordered):
         return stream(args, scale, files, client, show_stats, out, err)
@@ -350,12 +349,12 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         work = None           # nothing to compare, so no key is needed either
     else:
         try:
-            backend, key = resolve_backend(args.api)
+            backend = resolve_backend(args.api, model=args.model)
         except JevFatal as e:
             print(f"jsort: {e}", file=err)
             return 2
-        jev = Jev(key, backend, model=args.model, timeout=args.timeout, concurrency=args.concurrency,
-                  cache=None if args.no_cache else Cache(), transport=transport)
+        jev = Jev(backend, timeout=args.timeout, concurrency=args.concurrency,
+                  store=None if args.no_cache else Cache(), transport=transport)
 
         async def work() -> Ranking:
             try:

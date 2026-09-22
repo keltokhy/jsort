@@ -23,7 +23,7 @@ from numbers import Integral
 
 import numpy as np
 
-from .core import PRICE_PER_MTOK, Jev, JevError, JevFatal
+from .core import DEFAULT_PRICE_PER_MTOK as PRICE_PER_MTOK, Jev, JevError, JevFatal
 from .engine import Ranking
 from .model import place as locate
 from .scale import Scale, ScaleError
@@ -378,9 +378,8 @@ def place(texts: list[str], scale: Scale | str | os.PathLike, *, api: str | None
         scale = Scale.load(scale)
 
     async def go() -> Placement:
-        backend, key, requested = client_for(scale, api, model)
-        jev = Jev(key, backend, model=requested, timeout=timeout, concurrency=options.get("concurrency", 32),
-                  cache=Cache() if cache else None, transport=transport)
+        jev = Jev(client_for(scale, api, model), timeout=timeout, concurrency=options.get("concurrency", 32),
+                  store=Cache() if cache else None, transport=transport)
         try:
             return await aplace(texts, scale, jev, **options)
         finally:
@@ -395,13 +394,16 @@ def place(texts: list[str], scale: Scale | str | os.PathLike, *, api: str | None
 
 
 def client_for(scale: Scale, api: str | None, model: str | None):
-    """The backend, key and model to ask: what was given, else the environment's, else the scale's own.
+    """The backend to ask: what was given, else the environment's, else the scale's own.
 
     A model ID belongs to its API, so the scale's is only borrowed when the API is the scale's too.
     """
-    from .core import resolve_backend
+    from dataclasses import replace
 
-    backend, key = resolve_backend(api or os.environ.get("JEV_API") or scale.model["api"])
-    if not (model or os.environ.get("JEV_MODEL")) and backend.name == scale.model["api"]:
-        model = scale.model["requested"]
-    return backend, key, model
+    from .core import Settings, resolve_backend
+
+    settings = Settings.from_env()
+    backend = resolve_backend(api or settings.api or scale.model["api"], model=model)
+    if not (model or settings.model) and backend.name == scale.model["api"]:
+        backend = replace(backend, model=scale.model["requested"])
+    return backend

@@ -469,5 +469,7 @@ unaffected by this source migration.
 From the core checkout, `python scripts/dev.py setup`, `check`, and `wheel-check`
 set up and validate all five consumers in separate environments. For isolated
 worktrees such as `jgrep-jevkit`, add `--suffix=-jevkit` before the subcommand.
-CI checks out core tag `v0.1.0`; algorithms, prompts, cache identities, and budget
-policies remain in this repository.
+CI checks out core tag `v0.2.0`. Prompts, question construction, and budget policies
+remain in this repository; answer identity, the answer store, transport, and metering
+are the runtime's. Runtime 0.2 keys and stores answers differently from 0.1, so a cache
+written by an earlier version is re-asked once after upgrading.

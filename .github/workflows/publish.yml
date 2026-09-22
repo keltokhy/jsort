@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: keltokhy/jevkit-core
-          ref: v0.1.0
+          ref: v0.2.0
           path: jevkit-core
       - uses: astral-sh/setup-uv@v5
       - name: The tag must match the version in pyproject.toml
