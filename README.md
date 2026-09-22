@@ -61,11 +61,21 @@ uv tool install jev-sort        # the command it installs is jsort
 jsort finds a key the way [jgrep](https://github.com/keltokhy/jgrep) does: `TYPESAFE_API_KEY`,
 `OPENROUTER_API_KEY`, or a System One gateway (`JEV_GATEWAY_URL` and `JEV_GATEWAY_API_KEY`), from the
 environment or from `~/.config/jev/typesafe.key`, `openrouter.key` or `gateway.key`. Force a choice
-with `--api` or `JEV_API`. The two tools share one cache file. jsort keys answers by endpoint as well
-as model and question, so switching gateways cannot reuse another gateway's answers. Older entries
-without endpoint information remain on disk but are not reused. jsort also records which model gave
-each answer, in the `answer_metadata` table jlink introduced beside `answers`. The `answers` table
-and its keys are unchanged, so the other tools and older versions read and write the file as before.
+with `--api` or `JEV_API`. All the JevKit tools share one cache file, `~/.cache/jev/answers.sqlite`,
+and key every answer by provider, endpoint, model, text and question, so switching gateways cannot
+reuse another gateway's answers. Each answer is stored with the model that gave it, which is how a
+saved scale can say who answered.
+
+### Local servers (experimental)
+
+`--api diffusiongemma` and `--api laya` send the same comparisons to a System One server on your own
+machine, an [OpenJev](https://github.com/razorback16/openjev) or
+[laya-mlx](https://github.com/mizorewww/laya-mlx) process that you run separately. They are never
+chosen automatically, need no key, and count as $0 in `--stats` and the budget unless
+`JEV_PRICE_PER_MTOK` is set. The runtime's [DiffusionGemma](https://github.com/keltokhy/jevkit-core/blob/main/docs/diffusiongemma.md)
+and [Laya](https://github.com/keltokhy/jevkit-core/blob/main/docs/laya.md) guides explain the setup;
+start with `-j 1` and a long `--timeout` while a local model warms up. A scale built on a local
+model names it, so placements are checked against it like any other.
 
 ## Use
 
