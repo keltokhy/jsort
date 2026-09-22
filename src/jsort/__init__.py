@@ -1,6 +1,6 @@
 """jsort: sort by meaning, on TypeSafe's Jev decision model."""
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 from .engine import Ranking, arank, rank
 from .placement import Placement, aplace, place

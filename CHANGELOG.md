@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
+- Move transport, configuration, the answer cache and metering to the shared `jevkit-runtime` 0.2. Answers are
+  keyed by provider, endpoint and model and stored beside who answered them; the cache written by earlier
+  versions is reset on first use and re-asked.
 - Save a run's scale with `--save-scale FILE`: the description, the question as it was asked, the API, endpoint
   and model ID that were asked, a count of the fit's answers by the model that gave them, `--max-chars`, a summary
   of the fit and the anchors, each a text with its score and standard error. `--anchors N` (default 30) keeps the
@@ -10,9 +13,7 @@
 - Only a text with at least half of `-k` comparisons can be an anchor, which excludes nothing in a complete sort.
   `--save-scale` cannot be combined with `--top`, whose far end is barely measured, and a run the budget cut
   short records how many texts qualified and says so.
-- Record which model gave each answer, in the `answer_metadata` table jlink introduced beside `answers` in the
-  shared cache. The `answers` table and its keys are unchanged, so jgrep, jlink, jcol and jsort 0.1.3 read and
-  write the file as before. A scale is saved only when every answer behind it names the same model; one that
+- Record which model gave each answer beside the answer in the shared cache. A scale is saved only when every answer behind it names the same model; one that
   mixes two, or rests on answers that name none, is refused with the reason. `--any-model` saves it anyway, with
   the counts as they are.
 - Place new texts on a saved scale with `--scale FILE`. Each text is compared with anchors only, chosen
