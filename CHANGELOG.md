@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- Add `--api diffusiongemma` and `--api laya` for System One servers running on your own machine,
+  through `jevkit-runtime` 0.3: chosen only by name, no key needed, and metered at zero API fees
+  unless `JEV_PRICE_PER_MTOK` is set. The runtime's `docs/` explain how to run the servers.
+
 ## 0.2.0
 
 - Move transport, configuration, the answer cache and metering to the shared `jevkit-runtime` 0.2. Answers are
