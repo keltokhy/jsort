@@ -6,8 +6,6 @@ Transport, configuration, storage, validation, and usage parsing come from jevki
 
 from __future__ import annotations
 
-import asyncio
-import time
 from dataclasses import dataclass
 
 from jevkit_core import (
@@ -21,6 +19,8 @@ from jevkit_core import (
     JevError,
     JevFatal,
     Meter as _Meter,
+    answer_provenance,
+    backend_catalog,
     cache_path,
     config_dir,
     digest,
@@ -33,25 +33,7 @@ from jevkit_core import (
 Backend = _Backend
 
 
-BACKENDS = {
-    "typesafe": Backend(
-        "typesafe",
-        "https://api.typesafe.ai/v1/systemone",
-        "jev-latest",
-        "TYPESAFE_API_KEY",
-    ),
-    "openrouter": Backend(
-        "openrouter",
-        "https://openrouter.ai/api/alpha/decisions",
-        "~typesafe/jev-latest",
-        "OPENROUTER_API_KEY",
-    ),
-    # Anything that speaks System One and takes its own key: an LLM gateway such as LiteLLM or Ramp Router,
-    # a corporate proxy, a mock. The URL is the full endpoint, for example https://gateway.example.com/v1/systemone.
-    "gateway": Backend(
-        "gateway", "", "jev-latest", "JEV_GATEWAY_API_KEY", url_env="JEV_GATEWAY_URL"
-    ),
-}
+BACKENDS = backend_catalog("typesafe", "openrouter", "gateway")
 
 
 def resolve_backend(name: str | None = None):
@@ -131,16 +113,11 @@ class Jev(DecisionClient):
             self.meter.cached += 1
             return answers
 
-        # Identical requests already in the air share one call; logs repeat themselves a lot.
-        flight = "|".join(sorted(keys[qid] for qid in misses))
-        task = self._flights.get(flight)
-        source = "api" if task is None else "shared"
-        if task is None:
-            task = asyncio.ensure_future(self._call(state, misses, on_cost=on_cost))
-            self._flights[flight] = task
-            task.add_done_callback(lambda _: self._flights.pop(flight, None))
-        else:
-            self.meter.cached += 1
+        task, started = self.share_request(
+            (keys[qid] for qid in misses),
+            lambda: self._call(state, misses, on_cost=on_cost),
+        )
+        source = "api" if started else "shared"
         by_key, metadata = await task
         if provenance is not None:
             provenance.update({qid: metadata | {"source": source} for qid in misses})
@@ -150,15 +127,15 @@ class Jev(DecisionClient):
         self, state, questions: dict, data: dict, seconds: float, *, on_cost=None
     ) -> tuple[dict[str, dict], dict]:
         usage = parse_usage(data.get("usage"), price_per_mtok=PRICE_PER_MTOK)
-        tokens, cost = usage.tokens, usage.cost
-        self.meter.calls += 1
-        self.meter.input_tokens += tokens
-        self.meter.cost += cost
-        self.meter.max_call_cost = max(self.meter.max_call_cost, cost)
-        if on_cost is not None:
-            on_cost(cost)
-        self.meter.latencies.append(seconds)
-        self.meter.model = data.get("model") or self.model
+
+        def charge(cost):
+            self.meter.max_call_cost = max(self.meter.max_call_cost, cost)
+            if on_cost is not None:
+                on_cost(cost)
+
+        self.meter.record(
+            usage, seconds, model=data.get("model") or self.model, on_cost=charge
+        )
         answers = data["answers"]
         if not isinstance(answers, dict):
             raise JevError("invalid answers returned: expected an object")
@@ -171,16 +148,11 @@ class Jev(DecisionClient):
             out[k] = answers[qid]
         # The model the API names, literally. The meter's falls back to the one requested; this must not, since a
         # saved scale vouches for it. The fields are jlink's, so either tool can read what the other recorded.
-        resolved = data.get("model")
-        metadata = {
-            "version": 1,
-            "provider": self.backend.name,
-            "requested_model": self.model,
-            "resolved_model": resolved
-            if isinstance(resolved, str) and resolved.strip()
-            else None,
-            "answered_at": time.time(),
-        }
+        metadata = answer_provenance(
+            provider=self.backend.name,
+            requested_model=self.model,
+            resolved_model=data.get("model"),
+        )
         # Validate the entire response before storing any part of it.
         if self.cache:
             for k, answer in out.items():
