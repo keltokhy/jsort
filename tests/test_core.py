@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import pytest
 
-from jsort.core import Backend, Cache, Jev, JevError
+from jevkit_runtime import AnswerStore, Backend, Client, JevError
 from jsort.engine import question
 
 
@@ -15,7 +15,7 @@ def fixture(name="openrouter", url="https://fixture.invalid/decisions", model="j
 
 def test_cache_is_scoped_to_the_endpoint(tmp_path, monkeypatch):
     monkeypatch.delenv("JEV_URL", raising=False)
-    cache = Cache(tmp_path / "answers.sqlite")
+    cache = AnswerStore(tmp_path / "answers.sqlite")
     calls = []
 
     async def fake(request):
@@ -25,7 +25,7 @@ def test_cache_is_scoped_to_the_endpoint(tmp_path, monkeypatch):
 
     async def go():
         for host, expected in [("first", 0.9), ("second", 0.1), ("first", 0.9), ("second", 0.1)]:
-            jev = Jev(fixture("gateway", f"https://{host}.example/decisions"), store=cache,
+            jev = Client(fixture("gateway", f"https://{host}.example/decisions"), store=cache,
                       transport=httpx.MockTransport(fake))
             try:
                 answers = await jev.ask({"A": "a", "B": "b"}, {"q": question("higher")})
@@ -40,7 +40,7 @@ def test_cache_is_scoped_to_the_endpoint(tmp_path, monkeypatch):
 
 
 def test_only_the_request_owner_is_charged_and_cache_hits_are_free(tmp_path):
-    cache = Cache(tmp_path / "answers.sqlite")
+    cache = AnswerStore(tmp_path / "answers.sqlite")
     charges = [[], [], []]
 
     async def fake(request):
@@ -48,7 +48,7 @@ def test_only_the_request_owner_is_charged_and_cache_hits_are_free(tmp_path):
         return httpx.Response(200, json={"answers": {"q": {"noul": 0.5}}, "usage": {"cost": 0.01}})
 
     async def go():
-        jev = Jev(fixture(), store=cache, transport=httpx.MockTransport(fake))
+        jev = Client(fixture(), store=cache, transport=httpx.MockTransport(fake))
         try:
             state, questions = {"A": "a", "B": "b"}, {"q": question("higher")}
             await asyncio.gather(*(jev.ask(state, questions, on_cost=charges[i].append) for i in range(2)))
@@ -71,7 +71,7 @@ def test_a_billed_invalid_answer_still_reports_its_charge():
         transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
             "answers": {"q": {"noul": 2}}, "usage": {"cost": 0.01},
         }))
-        jev = Jev(fixture(), transport=transport)
+        jev = Client(fixture(), transport=transport)
         try:
             with pytest.raises(JevError):
                 await jev.ask({"A": "a", "B": "b"}, {"q": question("higher")}, on_cost=charges.append)
@@ -86,19 +86,23 @@ def test_who_answered_is_kept_beside_the_answers(tmp_path):
         return httpx.Response(200, json={"model": "jev-1.13", "answers": {"q": {"noul": 0.75}}, "usage": {"cost": 0.01}})
 
     async def go():
-        jev = Jev(fixture("gateway", "https://gateway.example/decisions"), store=Cache(tmp_path / "answers.sqlite"),
+        jev = Client(fixture("gateway", "https://gateway.example/decisions"), store=AnswerStore(tmp_path / "answers.sqlite"),
                   transport=httpx.MockTransport(fake))
         try:
             state, q = {"A": "old a", "B": "old b"}, question("higher")
             jev.store.put(jev.key(state, q), {"noul": 0.25})          # an answer nobody attributed
-            old, new, again = {}, {}, {}
-            assert (await jev.ask(state, {"q": q}, provenance=old))["q"] == {"noul": 0.25}
-            assert old["q"]["source"] == "cache" and old["q"].get("resolved_model") is None   # unknown stays unknown
+            old = await jev.ask(state, {"q": q})
+            assert old["q"] == {"noul": 0.25}
+            assert old.origins["q"]["source"] == "cache" and old.origins["q"].get("resolved_model") is None
             fresh = {"A": "new a", "B": "new b"}
-            assert (await jev.ask(fresh, {"q": q}, provenance=new))["q"] == {"noul": 0.75}
-            assert (new["q"]["source"], new["q"]["resolved_model"], new["q"]["provider"]) == ("api", "jev-1.13", "gateway")
-            assert (await jev.ask(fresh, {"q": q}, provenance=again))["q"] == {"noul": 0.75}
-            assert (again["q"]["source"], again["q"]["resolved_model"]) == ("cache", "jev-1.13") and jev.meter.calls == 1
+            new = await jev.ask(fresh, {"q": q})
+            assert new["q"] == {"noul": 0.75}
+            origin = new.origins["q"]
+            assert (origin["source"], origin["resolved_model"], origin["provider"]) == ("api", "jev-1.13", "gateway")
+            again = await jev.ask(fresh, {"q": q})
+            assert again["q"] == {"noul": 0.75}
+            assert (again.origins["q"]["source"], again.origins["q"]["resolved_model"]) == ("cache", "jev-1.13")
+            assert jev.meter.calls == 1
             assert jev.store.entry(jev.key(fresh, q)).metadata["provider"] == "gateway"
         finally:
             await jev.close()

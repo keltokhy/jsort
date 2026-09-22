@@ -25,7 +25,8 @@ import time
 from concurrent.futures import CancelledError
 
 from . import __version__
-from .core import PROVIDERS, Cache, Jev, JevFatal, Settings, resolve_backend
+from jevkit_runtime import AnswerStore, Client, JevFatal, Settings, resolve
+from .core import PROVIDERS
 from .engine import Ranking, arank
 from .inputs import Record, read, records as read_records
 from .placement import Placement, Placer, aplace, client_for, collect
@@ -176,7 +177,7 @@ def write(records: list[Record], header: list[str] | None, ranking: Ranking, ord
     out.flush()
 
 
-def summary(records: list[Record], ranking: Ranking, jev: Jev) -> str:
+def summary(records: list[Record], ranking: Ranking, jev: Client) -> str:
     parts = [f"{len(records):,} texts, {ranking.asked:,} comparisons in {ranking.rounds} rounds"]
     if ranking.reliability is not None:
         parts.append(f"reliability {ranking.reliability:.2f}")
@@ -292,10 +293,10 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
               f"shows {args.max_chars:,}", file=err)
     show_stats = args.stats or (args.stats is None and err.isatty())
 
-    def client() -> Jev:
+    def client() -> Client:
         """The scale's API and model unless others were named. Made inside the running loop, where it is closed."""
-        return Jev(client_for(scale, args.api, args.model), timeout=args.timeout, concurrency=args.concurrency,
-                   store=None if args.no_cache else Cache(), transport=transport)
+        return Client(client_for(scale, args.api, args.model), timeout=args.timeout, concurrency=args.concurrency,
+                   store=None if args.no_cache else AnswerStore(), transport=transport)
 
     if scale and (args.keep_order or args.unordered):
         return stream(args, scale, files, client, show_stats, out, err)
@@ -349,12 +350,12 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         work = None           # nothing to compare, so no key is needed either
     else:
         try:
-            backend = resolve_backend(args.api, model=args.model)
+            backend = resolve(PROVIDERS, args.api, model=args.model)
         except JevFatal as e:
             print(f"jsort: {e}", file=err)
             return 2
-        jev = Jev(backend, timeout=args.timeout, concurrency=args.concurrency,
-                  store=None if args.no_cache else Cache(), transport=transport)
+        jev = Client(backend, timeout=args.timeout, concurrency=args.concurrency,
+                  store=None if args.no_cache else AnswerStore(), transport=transport)
 
         async def work() -> Ranking:
             try:

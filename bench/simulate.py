@@ -15,7 +15,7 @@ import zlib
 
 import numpy as np
 
-from jsort.core import Meter
+from jevkit_runtime import Answers, Meter
 from jsort.engine import arank
 from jsort.model import fit
 from jsort.placement import aplace
@@ -29,10 +29,10 @@ class SimulatedJev:
         e = np.random.default_rng(zlib.crc32(f"{a},{b}".encode())).standard_normal() * self.quirk
         return 1 / (1 + math.exp(-(self.theta[a] - self.theta[b] + self.gamma + e)))
 
-    async def ask(self, state, questions, *, on_cost=None, provenance=None):
-        if provenance is not None:       # a saved scale names the model that answered, so the judge has to have a name
-            provenance["q"] = {"resolved_model": "simulated-judge", "source": "api"}
-        return {"q": {"type": "noul", "noul": self.p(int(state["A"]), int(state["B"]))}}
+    async def ask(self, state, questions, *, on_cost=None):
+        answer = {"q": {"type": "noul", "noul": self.p(int(state["A"]), int(state["B"]))}}
+        # a saved scale names the model that answered, so the judge has to have a name
+        return Answers(answer, {"q": {"resolved_model": "simulated-judge", "source": "api"}})
 
 
 def spearman(a, b) -> float:

@@ -20,7 +20,7 @@ import pytest
 
 import jsort
 from jsort.cli import main
-from jsort.core import Backend, Jev
+from jevkit_runtime import Backend, Client
 from jsort.placement import aplace
 from jsort.scale import Scale, ScaleError, choose
 
@@ -477,7 +477,7 @@ def test_the_budget_stops_placement_between_texts(tmp_path, scale):
 def test_concurrent_placement_respects_the_remaining_budget(scale):
     async def go(budget, cost=0.01):
         oracle = Oracle(cost=cost)
-        jev = Jev(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(oracle))
+        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(oracle))
         try:
             result = await aplace(HELD[:10], scale, jev, budget=budget, any_model=True)
             return result, len(oracle.bodies), jev.meter.cost
@@ -800,17 +800,16 @@ def test_a_closed_pipe_ends_a_stream_quietly_even_before_the_first_row(tmp_path,
 
 def test_a_stand_in_judge_can_sort_save_and_place():
     # bench/simulate.py drives arank and aplace with an object that has only `ask` and `meter`. Keep that working.
-    from jsort.core import Meter
+    from jevkit_runtime import Answers, Meter
     from jsort.engine import arank
 
     class Judge:
         meter = Meter()
 
-        async def ask(self, state, questions, *, on_cost=None, provenance=None):
-            if provenance is not None:
-                provenance["q"] = {"resolved_model": "stand-in", "source": "api"}
+        async def ask(self, state, questions, *, on_cost=None):
             value = lambda t: float(re.search(r"v=(-?[\d.]+)", t).group(1))
-            return {"q": {"noul": 1 / (1 + math.exp(-(value(state["A"]) - value(state["B"]))))}}
+            answer = {"q": {"noul": 1 / (1 + math.exp(-(value(state["A"]) - value(state["B"]))))}}
+            return Answers(answer, {"q": {"resolved_model": "stand-in", "source": "api"}})
 
     async def go():
         r = await arank(BASE[:30], "x", Judge())

@@ -10,7 +10,7 @@ from numbers import Integral
 
 import numpy as np
 
-from .core import Jev, JevError, JevFatal
+from jevkit_runtime import Client, JevError, JevFatal
 from .model import Fit, fit, information, reliability, shortfall, standard_errors
 from .scale import DEFAULT_ANCHORS, Scale, build, identity, question  # noqa: F401  (question is part of this module's API)
 from .schedule import Schedule
@@ -54,7 +54,7 @@ class Ranking:
         return build(self, anchors, unit=unit, field=field, any_model=any_model)
 
 
-async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int = 10, top: int | None = None,
+async def arank(texts: list[str], description: str, jev: Client, *, per_item: int = 10, top: int | None = None,
                 lowest: bool = False, seed: int = 0, budget: float | None = None, max_chars: int = 8000,
                 concurrency: int = 32, progress=None) -> Ranking:
     """Place texts on a scale by asking Jev about pairs of them.
@@ -111,9 +111,8 @@ async def arank(texts: list[str], description: str, jev: Jev, *, per_item: int =
                 out.over_budget = True
                 return None
             try:
-                origin: dict = {}
-                answer = await jev.ask({"A": items[i], "B": items[j]}, {"q": q}, on_cost=record_cost, provenance=origin)
-                return i, j, float(answer["q"]["noul"]), (origin.get("q") or {}).get("resolved_model")
+                answer = await jev.ask({"A": items[i], "B": items[j]}, {"q": q}, on_cost=record_cost)
+                return i, j, float(answer["q"]["noul"]), answer.origins["q"].get("resolved_model")
             except JevError as e:
                 out.errors.append(str(e))
             except JevFatal as e:
@@ -200,15 +199,16 @@ def rank(texts: list[str], description: str, *, api: str | None = None, model: s
     """
     import concurrent.futures
 
-    from .core import Cache, resolve_backend
+    from jevkit_runtime import AnswerStore, resolve
+    from .core import PROVIDERS
 
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and greater than 0")
 
     async def go() -> Ranking:
-        backend = resolve_backend(api, model=model)
-        jev = Jev(backend, timeout=timeout, concurrency=options.get("concurrency", 32),
-                  store=Cache() if cache else None, transport=transport)
+        backend = resolve(PROVIDERS, api, model=model)
+        jev = Client(backend, timeout=timeout, concurrency=options.get("concurrency", 32),
+                  store=AnswerStore() if cache else None, transport=transport)
         try:
             return await arank(texts, description, jev, **options)
         finally:

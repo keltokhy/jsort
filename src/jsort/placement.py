@@ -23,7 +23,7 @@ from numbers import Integral
 
 import numpy as np
 
-from .core import DEFAULT_PRICE_PER_MTOK as PRICE_PER_MTOK, Jev, JevError, JevFatal
+from jevkit_runtime import Answers, DEFAULT_PRICE_PER_MTOK as PRICE_PER_MTOK, Client, JevError, JevFatal
 from .engine import Ranking
 from .model import place as locate
 from .scale import Scale, ScaleError
@@ -147,7 +147,7 @@ class _Purse:
 class Placer:
     """One run's shared state: the scale, the client, the budget and what went wrong. `place` takes one text."""
 
-    def __init__(self, scale: Scale, jev: Jev, *, per_item: int = 10, seed: int = 0, budget: float | None = None,
+    def __init__(self, scale: Scale, jev: Client, *, per_item: int = 10, seed: int = 0, budget: float | None = None,
                  max_chars: int | None = None, concurrency: int = 32, any_model: bool = False):
         max_chars = scale.max_chars if max_chars is None else max_chars
         for name, value, minimum in (("per_item", per_item, 2), ("concurrency", concurrency, 1),
@@ -182,12 +182,12 @@ class Placer:
     def halted(self) -> bool:
         return bool(self.fatal) or self.purse.over
 
-    async def _ask(self, state: dict, tokens: int, origin: dict) -> dict | None:
+    async def _ask(self, state: dict, tokens: int) -> Answers | None:
         """One request, if the budget has room for it beside those already in the air. None when it does not."""
         if not self.purse.take(tokens):
             return None
         try:
-            return await self.jev.ask(state, {"q": self.scale.question}, provenance=origin,
+            return await self.jev.ask(state, {"q": self.scale.question},
                                       on_cost=lambda cost: self.purse.charge(cost, tokens))
         finally:
             self.purse.give(tokens)
@@ -211,11 +211,10 @@ class Placer:
 
     async def _answer(self, state: dict, tokens: int) -> float | None:
         try:
-            origin: dict = {}
-            answer = await self._ask(state, tokens, origin)
+            answer = await self._ask(state, tokens)
             if answer is None:
                 return None
-            origin = origin.get("q") or {}
+            origin = answer.origins["q"]
             verified = bool(origin.get("resolved_model"))
             # Each answer is checked, the cached ones too: the cache keys on the ID asked for, not on who replied.
             if not self.any_model:
@@ -314,7 +313,7 @@ class Placer:
         return estimate, se, len(ys), int(estimate > high) - int(estimate < low), len(ys) < min(planned, self.planned)
 
 
-async def aplace(texts: list[str], scale: Scale | str | os.PathLike, jev: Jev, *, concurrency: int = 32,
+async def aplace(texts: list[str], scale: Scale | str | os.PathLike, jev: Client, *, concurrency: int = 32,
                  progress=None, **options) -> Placement:
     """Place texts on a saved scale, given a Scale or the path of one.
 
@@ -370,7 +369,7 @@ def place(texts: list[str], scale: Scale | str | os.PathLike, *, api: str | None
     """
     import concurrent.futures
 
-    from .core import Cache
+    from jevkit_runtime import AnswerStore
 
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and greater than 0")
@@ -378,8 +377,8 @@ def place(texts: list[str], scale: Scale | str | os.PathLike, *, api: str | None
         scale = Scale.load(scale)
 
     async def go() -> Placement:
-        jev = Jev(client_for(scale, api, model), timeout=timeout, concurrency=options.get("concurrency", 32),
-                  store=Cache() if cache else None, transport=transport)
+        jev = Client(client_for(scale, api, model), timeout=timeout, concurrency=options.get("concurrency", 32),
+                  store=AnswerStore() if cache else None, transport=transport)
         try:
             return await aplace(texts, scale, jev, **options)
         finally:
@@ -400,10 +399,11 @@ def client_for(scale: Scale, api: str | None, model: str | None):
     """
     from dataclasses import replace
 
-    from .core import Settings, resolve_backend
+    from jevkit_runtime import Settings, resolve
+    from .core import PROVIDERS
 
     settings = Settings.from_env()
-    backend = resolve_backend(api or settings.api or scale.model["api"], model=model)
+    backend = resolve(PROVIDERS, api or settings.api or scale.model["api"], model=model)
     if not (model or settings.model) and backend.name == scale.model["api"]:
         backend = replace(backend, model=scale.model["requested"])
     return backend
