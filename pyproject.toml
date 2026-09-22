@@ -7,6 +7,7 @@ license = "MIT"
 authors = [{ name = "Khaled Eltokhy" }]
 requires-python = ">=3.10"
 dependencies = [
+    "jevkit-core>=0.1.0,<0.2.0",
     "httpx>=0.27",
     "numpy>=1.24",
 ]
@@ -38,3 +39,6 @@ packages = ["src/jsort"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+jevkit-core = { path = "../jevkit-core", editable = true }

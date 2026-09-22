@@ -4,6 +4,9 @@ name: publish
 on:
   push:
     tags: ["v*"]
+defaults:
+  run:
+    working-directory: consumer
 jobs:
   pypi:
     runs-on: ubuntu-latest
@@ -13,6 +16,13 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: consumer
+      - uses: actions/checkout@v4
+        with:
+          repository: keltokhy/jevkit-core
+          ref: v0.1.0
+          path: jevkit-core
       - uses: astral-sh/setup-uv@v5
       - name: The tag must match the version in pyproject.toml
         run: test "v$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" = "$GITHUB_REF_NAME"

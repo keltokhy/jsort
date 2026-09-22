@@ -452,3 +452,19 @@ but the choice put 93% of its answers below 0.1 or above 0.9, where the noul lef
 between the two. Those in-between answers are what a scale is fitted from.
 
 MIT license.
+
+## Shared JevKit development
+
+This development branch uses `jevkit-core>=0.1.0,<0.2.0`. Clone the core beside this
+repository as `../jevkit-core`; `uv sync` installs it editably. Core Python edits
+then apply on the next run of this tool. Restart long-lived Python processes.
+The core is not yet published; this branch requires the sibling checkout until
+its initial release is available.
+
+From the core checkout, `python scripts/dev.py setup`, `check`, and `wheel-check`
+set up and validate the five consumers in separate environments. For the current
+isolated migration worktrees, add `--suffix=-jevkit` before the subcommand.
+The shared core README documents compatibility and release sequencing.
+
+CLI behavior and product algorithms stay in this repository. Consumer CI expects
+the core remote's `v0.1.0` tag; publish the core before publishing this branch.
