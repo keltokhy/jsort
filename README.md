@@ -461,8 +461,9 @@ run `uv sync`. Core Python edits apply on the next invocation of this tool;
 restart long-lived Python processes after editing.
 
 The distribution name is `jevkit-runtime` because `jevkit-core` on PyPI belongs
-to a different project. Until the initial runtime is on PyPI, use the sibling
-checkout for source development. Existing published versions of this tool are
+to a different project. The runtime is [available on PyPI](https://pypi.org/project/jevkit-runtime/).
+Use the sibling checkout for shared development, or `uv sync --no-sources` for a
+standalone source checkout. Existing published versions of this tool are
 unaffected by this source migration.
 
 From the core checkout, `python scripts/dev.py setup`, `check`, and `wheel-check`
