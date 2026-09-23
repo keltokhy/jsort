@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Compare the two local servers with Jev 1.13 in `docs/benchmarks/local-models-2026-09-22.md`,
+  summarized in the README. The readability comparison moves there from `docs/three-models-2026-09-22.md`.
+- Add `bench/local_models.py`, which runs the YC and Fed sorts on a local server and scores them
+  beside Jev's recorded runs.
+- `bench/fed.py check` sets the saved statement scores against the rate move on action days alone
+  and against FedLock's published scores, without a model call; the README's Fed paragraph now
+  reports both.
+
 ## 0.3.0
 
 - Add `--api diffusiongemma` and `--api laya` for System One servers running on your own machine,

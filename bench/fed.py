@@ -5,6 +5,7 @@ for the federal funds rate from FRED. Needs `pdftotext` (poppler) on the path.
 
     uv run python bench/fed.py prepare     # download every transcript since the first, in 2011, and cut out each opening statement
     uv run python bench/fed.py run         # sort one statement's sentences, then all the statements
+    uv run python bench/fed.py check [DATE] # free: the scores in fed.json against action days and against FedLock
 
 Two sorts, both on "more hawkish about inflation":
   the sentences of the latest opening statement, which is the example at the top of the README
@@ -14,12 +15,22 @@ The check on the second was fixed before it was run: the rank correlation betwee
 and the change in the top of the target range from the day before the press conference to 180 days
 after it, and with the move announced that day. Statements too recent to have 180 days behind them
 are left out of the first.
+
+`check` adds two more, after the fact and without a model call. The same-day move is zero on every hold,
+which is most meetings, so it also takes the rank correlation on the meetings that changed the rate alone,
+and the mean score of cuts, holds and hikes. And it sets the scores against FedLock (Joe Weisenthal,
+https://jnathan9.github.io/fedlock/), a running tournament that ranks about 4,000 Fed speeches with an
+open-weights model and TrueSkill; its published file is downloaded to bench/out/fed/fedlock-DATE.json and
+its press conferences matched to the statements by date. FedLock's scores move between its releases, so
+the date of the file is part of the result; pass a DATE to reuse a file already downloaded.
 """
 
 import csv
+import hashlib
 import io
 import json
 import re
+import statistics
 import subprocess
 import sys
 import time
@@ -31,6 +42,7 @@ OUT = Path(__file__).parent / "out" / "fed"
 CALENDAR = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 TRANSCRIPT = "https://www.federalreserve.gov/mediacenter/files/FOMCpresconf{}.pdf"
 TARGET = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU"
+FEDLOCK = "https://jnathan9.github.io/fedlock/data.json"
 DESCRIPTION = "more hawkish about inflation"
 FURNITURE = re.compile(r"^(Page \d+ of \d+|PRELIMINARY|FINAL|[A-Z][a-z]+ \d{1,2}, \d{4}|"
                        r"(Transcript of )?Chair\w* \w+[’']s Press Conference)$")
@@ -154,5 +166,72 @@ def run() -> None:
     (OUT / "fed.json").write_text(json.dumps({"table": table, "stats": stats}, indent=1))
 
 
+def fedlock(day: str | None = None) -> tuple[dict, dict]:
+    """FedLock's press-conference rows by date, from the file downloaded on `day` (today if not given)."""
+    day = day or date.today().isoformat()
+    path = OUT / f"fedlock-{day}.json"
+    if not path.exists():
+        path.write_bytes(fetch(FEDLOCK))
+    rows = {r["d"]: r for r in json.loads(path.read_text())["speeches"] if r.get("st") == "press_conference"}
+    meta = {"url": FEDLOCK, "file_date": day, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "press_conferences": len(rows), "fields": "m raw TrueSkill mean, ma era-adjusted"}
+    return rows, meta
+
+
+def fedlock_row(day: str, rows: dict) -> dict | None:
+    """FedLock usually dates a press conference the day after the meeting; take the nearest row within two days."""
+    d = date.fromisoformat(day)
+    return next((rows[k] for off in (0, 1, -1, 2, -2) if (k := (d + timedelta(days=off)).isoformat()) in rows), None)
+
+
+def checks(scores: dict, outcomes: dict, fedlock_rows: dict) -> dict:
+    """Statement scores by date against the move on action days, by kind of decision, and against FedLock.
+
+    `outcomes` is fed.json's table by date; a model that scored only some statements is checked on those.
+    """
+    scored = {d: s for d, s in scores.items() if s is not None and d in outcomes}
+    action = [(s, outcomes[d]["move"]) for d, s in scored.items() if outcomes[d]["move"]]
+    kinds = {"cuts": lambda m: m < 0, "holds": lambda m: m == 0, "hikes": lambda m: m > 0}
+    means = {kind: {"n": len(v), "mean": round(statistics.fmean(v), 4) if v else None}
+             for kind, test in kinds.items() for v in [[s for d, s in scored.items() if test(outcomes[d]["move"])]]}
+    matched = [(s, r) for d, s in scored.items() if (r := fedlock_row(d, fedlock_rows))]
+    return {"scored": len(scored),
+            "action_days": {"n": len(action), "spearman": round(spearman(*zip(*action)), 4) if len(action) > 2 else None},
+            "by_decision": means,
+            "fedlock": {"n": len(matched),
+                        "spearman_m": round(spearman([s for s, _ in matched], [r["m"] for _, r in matched]), 4) if len(matched) > 2 else None,
+                        "spearman_ma": round(spearman([s for s, _ in matched], [r["ma"] for _, r in matched]), 4) if len(matched) > 2 else None}}
+
+
+def check() -> None:
+    fed = json.loads((OUT / "fed.json").read_text())
+    outcomes = {d: {"move": move, "ahead": ahead} for d, _, _, _, move, ahead in fed["table"]}
+    scores = {d: score for d, _, score, _, _, _ in fed["table"]}
+    rows, meta = fedlock(sys.argv[2] if len(sys.argv) > 2 else None)
+    result = checks(scores, outcomes, rows)
+    # FedLock against its own earlier or later files, on the press conferences they share: how much its
+    # scores move between releases, which bounds what agreement with any one file can mean.
+    drift = {}
+    for other in sorted(OUT.glob("fedlock-*.json")):
+        day = other.stem[len("fedlock-"):]
+        if day == meta["file_date"]:
+            continue
+        theirs = fedlock(day)[0]
+        common = [d for d in rows if d in theirs]
+        drift[day] = {"n": len(common),
+                      "spearman_m": round(spearman([rows[d]["m"] for d in common], [theirs[d]["m"] for d in common]), 4),
+                      "spearman_ma": round(spearman([rows[d]["ma"] for d in common], [theirs[d]["ma"] for d in common]), 4)}
+    fed.setdefault("checks", {})[meta["file_date"]] = result | {"fedlock_file": meta, "fedlock_vs_its_other_files": drift}
+    (OUT / "fed.json").write_text(json.dumps(fed, indent=1))
+    a, m, f = result["action_days"], result["by_decision"], result["fedlock"]
+    print(f"rank correlation of the score with the move announced that day, on the {a['n']} meetings that moved: {a['spearman']:+.2f}")
+    print("mean score: " + "  ".join(f"{k} {v['mean']:+.2f} ({v['n']})" for k, v in m.items()))
+    print(f"rank correlation with FedLock's scores of {meta['file_date']} ({meta['press_conferences']} press conferences, "
+          f"{f['n']} matched): {f['spearman_m']:+.2f} raw, {f['spearman_ma']:+.2f} era-adjusted")
+    for day, v in drift.items():
+        print(f"FedLock's {meta['file_date']} scores against its {day} scores on the {v['n']} press conferences in both: "
+              f"{v['spearman_m']:+.2f} raw, {v['spearman_ma']:+.2f} era-adjusted")
+
+
 if __name__ == "__main__":
-    {"prepare": prepare, "run": run}[sys.argv[1] if len(sys.argv) > 1 else "run"]()
+    {"prepare": prepare, "run": run, "check": check}[sys.argv[1] if len(sys.argv) > 1 else "run"]()

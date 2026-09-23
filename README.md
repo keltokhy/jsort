@@ -77,6 +77,10 @@ and [Laya](https://github.com/keltokhy/jevkit-core/blob/main/docs/laya.md) guide
 start with `-j 1` and a long `--timeout` while a local model warms up. A scale built on a local
 model names it, so placements are checked against it like any other.
 
+[How well does it work](#how-well-does-it-work) compares both with Jev, and the
+[local-model results](https://github.com/keltokhy/jsort/blob/main/docs/benchmarks/local-models-2026-09-22.md)
+have the full record.
+
 ## Use
 
 ```bash
@@ -250,17 +254,16 @@ memory grows with the number of distinct texts, including in a stream.
 `--json` has no `rank` to give while streaming and prints `null`. In a sorted run the rank is among
 the texts of that input.
 
-**Beyond the anchors.** A text that scores above the highest anchor or below the lowest is outside
-the range of its eligible anchors. Far outside that range, answers saturate and the ridge pulls
-the score inward: the score is censored toward the scale and is best read as a bound, and its
-standard error is not meaningful. A small reported error does not establish precision there.
-Rebuild the scale with such texts included. For a score more than two logits past either end anchor,
-jsort leaves the standard error empty. This margin is a reporting rule, not a guarantee that errors
-closer to the anchors are calibrated. The score stays finite and flagged. `--json` carries `"beyond": "above"` or `"below"`,
+**Beyond the anchors.** A text that scores above the highest anchor or below the lowest is outside the
+range of its eligible anchors. Far outside that range, answers saturate and the ridge pulls the score
+inward: the score is censored toward the scale and is best read as a bound, and its standard error is
+not meaningful. A small reported error does not establish precision there. Rebuild the scale with such
+texts included. For a score more than two logits past either end anchor, jsort leaves the standard
+error empty. This margin is a reporting rule, not a guarantee that errors closer to the anchors are
+calibrated. The score stays finite and flagged. `--json` carries `"beyond": "above"` or `"below"`,
 `-o` on CSV and JSONL adds a `NAME_beyond` field, and stderr says how many texts fell outside and
-where the anchors end. Scores and errors stay numeric or empty: blank in plain `-o` and CSV, `null`
-in `--json` and JSONL. While streaming, stderr names each such
-text as it prints, up to ten of them.
+where the anchors end. Scores and errors stay numeric or empty: blank in plain `-o` and CSV, `null` in
+`--json` and JSONL. While streaming, stderr names each such text as it prints, up to ten of them.
 
 **The same model.** Scores from different models are not comparable. jsort asks the scale's API and
 model unless `--api`, `--model` or the environment name others, and refuses before any call when the
@@ -290,12 +293,12 @@ can give a score. An offline review found that using a t quantile with n-1 degre
 simulation. That correction is not applied to the reported errors, and it is not evidence of
 coverage on real texts.
 
-The model check is only as good as the name the API gives: if a provider reports
-an alias as the answering model, jsort cannot see the revision behind it, so pin the model with
-`--model` when building a scale that has to last. jsort cannot tell whether new texts are the kind the scale was built on: sentences can be placed
-on a scale of whole statements, and whether that means anything is for the user to judge. A placed
-text costs up to `-k` comparisons of its own, twice its share of a sort, where every comparison is
-shared by two texts.
+The model check is only as good as the name the API gives: if a provider reports an alias as the
+answering model, jsort cannot see the revision behind it, so pin the model with `--model` when
+building a scale that has to last. jsort cannot tell whether new texts are the kind the scale was
+built on: sentences can be placed on a scale of whole statements, and whether that means anything is
+for the user to judge. A placed text costs up to `-k` comparisons of its own, twice its share of a
+sort, where every comparison is shared by two texts.
 
 ## From Python
 
@@ -371,18 +374,18 @@ counts), at the dearest rate per estimated token seen so far, and at one and a h
 price until a charge has been seen. Requests already in the air count at today's rate. The first
 request of a run goes alone, and the number of texts being placed at once then doubles with each
 text that finishes without the rate rising, from one up to `-j`, which is five doublings at the
-default `-j 32`; a rise sends it back to one. A text is begun only if the budget covers all of its comparisons, so the
-budget stops a run between texts, and since the reservation is a cautious estimate a little of the
-budget is usually left unspent. It is still not a hard cap: cost is known only when a reply arrives,
-so the calls in the air at the moment a price rises can take spending past the limit, by at most
-`-j` requests at the new price. A stream that reaches the budget stops reading, finishes the texts
-it has begun, and exits with status 2. For a long-lived `tail -f`, set your own default once with
-`export JSORT_BUDGET=20`, or `0` for no limit.
+default `-j 32`; a rise sends it back to one. A text is begun only if the budget covers all of its
+comparisons, so the budget stops a run between texts, and since the reservation is a cautious
+estimate a little of the budget is usually left unspent. It is still not a hard cap: cost is known
+only when a reply arrives, so the calls in the air at the moment a price rises can take spending
+past the limit, by at most `-j` requests at the new price. A stream that reaches the budget stops
+reading, finishes the texts it has begun, and exits with status 2. For a long-lived `tail -f`, set
+your own default once with `export JSORT_BUDGET=20`, or `0` for no limit.
 
 ## How well does it work
 
 Two checks, run on 2026-09-19 with Jev 1.13 through OpenRouter. Both run the installed `jsort`
-command, uncached.
+command, uncached. The last part of this section compares two local models with Jev.
 
 **Against people making the same comparisons.** `bench/readability.py`. The CommonLit Ease of
 Readability corpus (Crossley et al. 2022) has 4,724 excerpts written for
@@ -403,9 +406,6 @@ measure can be expected to correlate with it above about 0.88.
 
 Two things to take from it.
 
-The same sample and setting were run on two local models on 2026-09-22: DiffusionGemma through OpenJev
-lands at r = 0.78 and Laya at chance; see [the three-model comparison](docs/three-models-2026-09-22.md).
-
 jsort gets most of the way to the ceiling from a two-word description. It beats every readability
 formula shipped with the corpus by a wide margin, and it beats the other thing you can do with two
 words, which is to ask for a probability per text and sort on that. That probability bunches up (73
@@ -417,16 +417,45 @@ The default is already on the plateau. `-k 10` and `-k 16` give the same answer,
 there, and the reliability of 0.98 says the same. Five cents' worth of comparisons orders 300 passages
 at r = 0.82, against a ceiling of 0.88.
 
-**Against what the Fed then did.** `bench/fed.py`. The 95 opening statements above, sorted whole on
-"more hawkish about inflation", against the top of the target range for the federal funds rate (FRED
-series DFEDTARU). Both tests were written into the script before the sort was run. The rank
-correlation between a statement's score and the move announced that day is +0.46 (95 statements).
-With the change in the target over the following 180 days it is +0.37 (91 statements). And the scale
-picks up what the rate decision alone does not: the holds of June, September and November 2023
-all rank among the thirteen most hawkish, because the chair held rates and talked tough. It gets
-the shape of fifteen years right. The six statements that announced hikes of 50 or 75 points in
-2022 are the top six, seven of 2023's eight statements fill ranks 7 to 13, and the bottom eight are
-all from March 2020 to January 2021.
+**Against what the Fed then did, and against an independent scale.** `bench/fed.py`. The 95
+opening statements above, sorted whole on "more hawkish about inflation". First, the top of the
+federal funds target range (FRED series DFEDTARU), the check written into the script before the
+sort ran: the rank correlation between a statement's score and the move announced that day is
++0.80 on the 32 meetings that moved the rate, and +0.46 over all 95, since on the 63 holds the
+label is zero whatever the chair said. The scale still orders holds (mean −0.70) between cuts
+(−1.03) and hikes (+2.65), and puts the holds of June, September and November 2023 among the
+thirteen most hawkish, because the chair held rates and talked tough. Second,
+[FedLock](https://jnathan9.github.io/fedlock/), Joe Weisenthal's running tournament that ranks
+about 4,000 Fed speeches with an open-weights model and 60,000 pairwise comparisons: jsort's scores
+have a rank correlation of +0.85 with its file of 2026-09-23 on the 89 press conferences both
+cover, and +0.93 with its file of 2026-09-20 on 92. The difference is FedLock's own movement
+between releases, +0.88 for the same conferences, so jsort agrees with FedLock about as well as
+FedLock agrees with itself. An independent, pre-registered evaluation of Jev on the same openings,
+[fedjev-bench](https://maybern-tripp-smith.github.io/fedjev-bench/), finds the same: +0.85 on
+action days and +0.94 with FedLock's 2026-09-20 scores. `bench/fed.py check` recomputes all of
+this from the saved scores without a model call.
+
+**On a local server.** On 2026-09-22 both [local servers](#local-servers-experimental) ran the two
+checks above, and two sorts of single lines scored against Jev's order: the 51 sentences at the top
+of this page and 500 YC company one-liners on "sounds more like science fiction". The
+[local-model results](https://github.com/keltokhy/jsort/blob/main/docs/benchmarks/local-models-2026-09-22.md)
+have every number.
+
+| Benchmark | Jev 1.13 (OpenRouter) | DiffusionGemma (`openjev-0.1`, local) | Laya (`laya-421m`, local) |
+|---|---:|---:|---:|
+| Readability, 300 excerpts: Pearson r with the teachers | 0.824 | 0.783 | 0.032 |
+| Fed, 95 statements: Spearman ρ with FedLock's scores of 2026-09-23 | +0.85 | +0.86 | refused |
+| Fed, 95 statements: Spearman ρ with Jev's scores | | 0.89 | refused |
+| Fed, the 51 sentences: Spearman ρ with Jev's scores | | 0.52 | -0.11 |
+| 500 YC one-liners: Spearman ρ with Jev's scores | | 0.65 | -0.13 |
+| Readability: wall-clock of the sort | under a minute | 823 s | 43 s |
+
+DiffusionGemma is a reasonable substitute for Jev on paragraphs and whole documents: it orders the
+95 statements much as Jev does, at 0.89, and agrees with FedLock's independent scale as closely as
+Jev does. On single short lines it is not: its sorts had a reliability of 0.62 on the
+one-liners and 0.39 on the sentences, where Jev's were 0.97 and 0.96. Laya is fast, but its order follows
+neither the teachers nor Jev, and it reads at most 512 tokens including the question, so it refused
+every statement. Jev remains the default.
 
 ## Tips
 

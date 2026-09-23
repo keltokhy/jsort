@@ -1,0 +1,1050 @@
+{
+ "date": "2026-09-22",
+ "timezone": "America/New_York",
+ "hardware": "Apple M3 Ultra, 96 GiB unified memory; both servers local, loaded throughout",
+ "servers": {
+  "diffusiongemma": {
+   "url": "http://127.0.0.1:8080/v1/systemone",
+   "server": "OpenJev",
+   "server_commit": "e04794a",
+   "api": "diffusiongemma",
+   "model": "openjev-0.1",
+   "weights": "mlx-community/diffusiongemma-26B-A4B-it-4bit",
+   "weights_revision": "a7a8140",
+   "note": "executes model work serially on the GPU"
+  },
+  "laya": {
+   "url": "http://127.0.0.1:8081/v1/systemone",
+   "server": "jevkit-core scripts/laya_server.py",
+   "laya_mlx_commit": "fc1df62",
+   "api": "laya",
+   "model": "laya-421m",
+   "checkpoint": "aac6fef/laya-mlx",
+   "checkpoint_revision": "0476785",
+   "context_window_tokens": 512,
+   "note": "requests whose state would be cropped are rejected with HTTP 422 (audit status context_rejected); jsort counts them as failed comparisons, not answers",
+   "audit_log": "the server's --audit file, named by LAYA_AUDIT; each run counts the lines it added"
+  }
+ },
+ "concurrency_and_deadlines": {
+  "diffusiongemma": {
+   "jobs_in_flight_default": 4,
+   "timeout_seconds": 300
+  },
+  "laya": {
+   "jobs_in_flight_default": 4,
+   "timeout_seconds": 120
+  },
+  "note": "per-run jobs and timeout actually used are in each run's `jobs` and `timeout`"
+ },
+ "cost": "--budget 0 on every run; local calls are metered at $0; no hosted model was called",
+ "cache": "every run used a new empty XDG_CACHE_HOME (the run's `cache`) and an empty XDG_CONFIG_HOME",
+ "wall_clock": "`seconds` is perf_counter around the jsort subprocess; `jsort_seconds` is jsort's own --stats figure; `started`/`ended` are America/New_York",
+ "probes": {
+  "runs": {
+   "diffusiongemma-fed-whole-probe": {
+    "k": 2,
+    "jobs": 4,
+    "input": {
+     "of": 95,
+     "statements": 5,
+     "seed": 20260922,
+     "draw": "numpy.random.default_rng(seed).choice(95, statements, replace=False), sorted by date",
+     "dates": [
+      "2022-12-14",
+      "2025-01-29",
+      "2025-05-07",
+      "2025-06-18",
+      "2026-04-29"
+     ]
+    },
+    "started": "2026-09-22T21:45:23-04:00",
+    "seconds": 35.8,
+    "comparisons": 5,
+    "tokens": 13868,
+    "cost": 0.0,
+    "seconds_per_comparison": 7.16,
+    "projected_minutes_all_95": 56.7,
+    "statements_within_60_minutes": 95,
+    "raw": "bench/out/local-2026-09-22/diffusiongemma-fed-whole-probe.json"
+   }
+  },
+  "note": "tagged probe runs decided fed-whole full vs subsample; left out of `runs`"
+ },
+ "jev": {
+  "model": "Jev 1.13 (hosted; not called for this benchmark, every number read from files)",
+  "yc": {
+   "source": "bench/out/yc/yc-scifi.csv (scores) and bench/out/yc/yc-scifi.log (stats), 2026-09-20",
+   "stats": "jsort: 6,081 texts, 30,401 comparisons in 9 rounds; reliability 0.97; first-position lean -0.12; 30,401 calls, 0 cached; 9,809,085 tokens; $0.4120; 503.9s",
+   "comparisons": 30401,
+   "reliability": 0.97,
+   "cost_usd": 0.412,
+   "seconds": 503.9,
+   "jobs": 32,
+   "sample": "the 500 companies of bench/out/local-2026-09-22/yc-sample500.csv (yc.csv rows, seed 20260922), joined on the exact `text` field Jev saw",
+   "caveat": "Jev's scores come from one fit over all 6,081 companies, not a 500-company run; the local correlations are agreement with Jev's full-population scale. No like-for-like Jev wall-clock or reliability exists for a 500-company sort."
+  },
+  "fed-latest": {
+   "source": "bench/out/local-2026-09-22/jev-latest.json: jsort 2897d18 replayed over ~/.cache/jev/answers.sqlite (read-only), model ~typesafe/jev-latest; answers from the 2026-09-19 run of bench/fed.py",
+   "stats": "255 comparisons in 10 rounds; reliability 0.96; lean -0.07 (bench/out/fed/run.log, 2026-09-19)",
+   "reliability": 0.9604,
+   "checked_against_run_log": 10,
+   "mismatched": 0,
+   "caveat": "run.log prints 10 of the 51 scores; the other 41 are reconstructed by the replay. The first-run wall-clock was never logged (run.log shows a cached rerun, 0.1 s)."
+  },
+  "fed-whole": {
+   "source": "bench/out/fed/fed.json and bench/out/fed/run.log, 2026-09-19",
+   "stats": "jsort: 95 texts, 475 comparisons in 10 rounds; reliability 0.98; first-position lean -0.04; 407 calls, 68 cached; 1,351,556 tokens; $0.0568; 9.2s",
+   "same_day": "+0.46 (95 statements)",
+   "next_180_days": "+0.37 (91 statements)",
+   "checks": {
+    "2026-09-23": {
+     "scored": 95,
+     "action_days": {
+      "n": 32,
+      "spearman": 0.7971
+     },
+     "by_decision": {
+      "cuts": {
+       "n": 11,
+       "mean": -1.0284
+      },
+      "holds": {
+       "n": 63,
+       "mean": -0.7044
+      },
+      "hikes": {
+       "n": 21,
+       "mean": 2.6518
+      }
+     },
+     "fedlock": {
+      "n": 89,
+      "spearman_m": 0.8474,
+      "spearman_ma": 0.4039
+     },
+     "fedlock_file": {
+      "url": "https://jnathan9.github.io/fedlock/data.json",
+      "file_date": "2026-09-23",
+      "sha256": "aec9e83202d93759a6171d50c67ec625c5c59037380206698ae62e9f1a5eb89a",
+      "press_conferences": 93,
+      "fields": "m raw TrueSkill mean, ma era-adjusted"
+     },
+     "fedlock_vs_its_other_files": {
+      "2026-09-20": {
+       "n": 93,
+       "spearman_m": 0.8787,
+       "spearman_ma": 0.6639
+      }
+     }
+    },
+    "2026-09-20": {
+     "scored": 95,
+     "action_days": {
+      "n": 32,
+      "spearman": 0.7971
+     },
+     "by_decision": {
+      "cuts": {
+       "n": 11,
+       "mean": -1.0284
+      },
+      "holds": {
+       "n": 63,
+       "mean": -0.7044
+      },
+      "hikes": {
+       "n": 21,
+       "mean": 2.6518
+      }
+     },
+     "fedlock": {
+      "n": 92,
+      "spearman_m": 0.9318,
+      "spearman_ma": 0.6803
+     },
+     "fedlock_file": {
+      "url": "https://jnathan9.github.io/fedlock/data.json",
+      "file_date": "2026-09-20",
+      "sha256": "cce8605ee693240c195ca9f12352651f29f55a61885300abeee99af132eed5b8",
+      "press_conferences": 96,
+      "fields": "m raw TrueSkill mean, ma era-adjusted"
+     },
+     "fedlock_vs_its_other_files": {
+      "2026-09-23": {
+       "n": 93,
+       "spearman_m": 0.8787,
+       "spearman_ma": 0.6639
+      }
+     }
+    }
+   },
+   "note": "68 of 475 answers came from an earlier cache, so the 9.2 s is not a clean wall-clock. Each run's same_day/next_180_days also carry Jev's Spearman on exactly the statements that model scored (jev_same_statements). `checks` is fed.py check: action days alone, means by decision, and FedLock, keyed by the FedLock file's date."
+  }
+ },
+ "fedlock": {
+  "note": "FedLock (https://jnathan9.github.io/fedlock/) is a running tournament; its scores move between releases, so every FedLock number is keyed by the date of the file it was computed from. The 2026-09-20 file is the snapshot archived by fedjev-bench (https://github.com/maybern-tripp-smith/fedjev-bench, data/raw/fedlock/data.json); the 2026-09-23 file was downloaded by fed.py check.",
+  "files": {
+   "2026-09-23": {
+    "url": "https://jnathan9.github.io/fedlock/data.json",
+    "file_date": "2026-09-23",
+    "sha256": "aec9e83202d93759a6171d50c67ec625c5c59037380206698ae62e9f1a5eb89a",
+    "press_conferences": 93,
+    "fields": "m raw TrueSkill mean, ma era-adjusted"
+   },
+   "2026-09-20": {
+    "url": "https://jnathan9.github.io/fedlock/data.json",
+    "file_date": "2026-09-20",
+    "sha256": "cce8605ee693240c195ca9f12352651f29f55a61885300abeee99af132eed5b8",
+    "press_conferences": 96,
+    "fields": "m raw TrueSkill mean, ma era-adjusted"
+   }
+  }
+ },
+ "runs": {
+  "diffusiongemma/fed-latest": {
+   "model": "diffusiongemma",
+   "api": "diffusiongemma",
+   "requested_model": "openjev-0.1",
+   "url": "http://127.0.0.1:8080/v1/systemone",
+   "bench": "fed-latest",
+   "tag": "",
+   "stem": "diffusiongemma-fed-latest",
+   "description": "more hawkish about inflation",
+   "k": 10,
+   "jobs": 4,
+   "timeout": 300,
+   "input": {
+    "file": "bench/out/fed/latest.txt"
+   },
+   "cache": "bench/out/local-2026-09-22/cache-diffusiongemma-fed-latest",
+   "started": "2026-09-22T22:06:47-04:00",
+   "ended": "2026-09-22T22:08:35-04:00",
+   "seconds": 108.3,
+   "exit": 0,
+   "texts": 51,
+   "scored": 51,
+   "stats": "jsort: 51 texts, 254 comparisons in 10 rounds; reliability 0.39; first-position lean -0.34; 254 calls, 0 cached; 36,468 tokens; $0.0000; 108.1s",
+   "comparisons": 254,
+   "rounds": 10,
+   "reliability": 0.39,
+   "lean": -0.34,
+   "calls": 254,
+   "cached": 0,
+   "retries": null,
+   "tokens": 36468,
+   "cost": 0.0,
+   "jsort_seconds": 108.1,
+   "failed_comparisons": 0,
+   "notes": [
+    "jsort: reliability 0.39: two halves of the comparisons give different orders. Raise -k, or reword the description so that any two of these texts can be compared on it"
+   ],
+   "sample_errors": [],
+   "provenance": {
+    "answers": 254,
+    "origins": {
+     "diffusiongemma|openjev-0.1|openjev-0.1": 254
+    }
+   },
+   "vs_jev": {
+    "n": 51,
+    "spearman": 0.5217194570135746,
+    "pearson": 0.6520161367008499
+   },
+   "top10_overlap": 7,
+   "top6": [
+    "The plain fact is that inflation is too high and has been for too long.",
+    "Too many categories are still posting increases above 3 percent, on both a 6- and 12-month basis.",
+    "This summer’s inflation readings do not tell me that underlying trends have meaningfully improved.",
+    "I defined the standard for action: We must be confident that underlying inflation is moving to our objective, clearly and at sufficient speed.",
+    "The committee’s unanimous vote shows our resolve to achieve price stability on a timelier basis.",
+    "At our July meeting, we all agreed that inflation remained too high, and we expressed our joint readiness to act as circumstances might require."
+   ],
+   "jev_top6": [
+    "The plain fact is that inflation is too high and has been for too long.",
+    "I defined the standard for action: We must be confident that underlying inflation is moving to our objective, clearly and at sufficient speed.",
+    "Yet for more than five years, inflation has been running above target.",
+    "Too many categories are still posting increases above 3 percent, on both a 6- and 12-month basis.",
+    "In the meeting just concluded, the FOMC decided to raise the target range for the federal funds rate by ¼ percentage point to 3¾ to 4 percent, in support of the Federal Reserve’s dual mandate.",
+    "The committee’s unanimous vote shows our resolve to achieve price stability on a timelier basis."
+   ],
+   "attempts": [
+    "diffusiongemma-fed-latest"
+   ],
+   "command": "more hawkish about inflation ...",
+   "raw": {
+    "json": "bench/out/local-2026-09-22/diffusiongemma-fed-latest.json",
+    "log": "bench/out/local-2026-09-22/diffusiongemma-fed-latest.log",
+    "stdout": "bench/out/local-2026-09-22/diffusiongemma-fed-latest.stdout",
+    "stderr": "bench/out/local-2026-09-22/diffusiongemma-fed-latest.stderr",
+    "console": "bench/out/local-2026-09-22/console-diffusiongemma-fed-latest.txt"
+   },
+   "other_server": "loaded but idle (runs strictly serialized, one model and one benchmark at a time)"
+  },
+  "diffusiongemma/fed-whole": {
+   "model": "diffusiongemma",
+   "api": "diffusiongemma",
+   "requested_model": "openjev-0.1",
+   "url": "http://127.0.0.1:8080/v1/systemone",
+   "bench": "fed-whole",
+   "tag": "",
+   "stem": "diffusiongemma-fed-whole",
+   "description": "more hawkish about inflation",
+   "k": 10,
+   "jobs": 4,
+   "timeout": 300,
+   "input": {
+    "of": 95,
+    "dates": [
+     "2011-04-27",
+     "2011-06-22",
+     "2011-11-02",
+     "2012-01-25",
+     "2012-04-25",
+     "2012-06-20",
+     "2012-09-13",
+     "2012-12-12",
+     "2013-03-20",
+     "2013-06-19",
+     "2013-09-18",
+     "2013-12-18",
+     "2014-03-19",
+     "2014-06-18",
+     "2014-09-17",
+     "2014-12-17",
+     "2015-03-18",
+     "2015-06-17",
+     "2015-09-17",
+     "2015-12-16",
+     "2016-03-16",
+     "2016-06-15",
+     "2016-09-21",
+     "2016-12-14",
+     "2017-03-15",
+     "2017-06-14",
+     "2017-09-20",
+     "2017-12-13",
+     "2018-03-21",
+     "2018-06-13",
+     "2018-09-26",
+     "2018-12-19",
+     "2019-01-30",
+     "2019-03-20",
+     "2019-05-01",
+     "2019-06-19",
+     "2019-07-31",
+     "2019-09-18",
+     "2019-10-30",
+     "2019-12-11",
+     "2020-01-29",
+     "2020-03-03",
+     "2020-03-15",
+     "2020-04-29",
+     "2020-06-10",
+     "2020-07-29",
+     "2020-09-16",
+     "2020-11-05",
+     "2020-12-16",
+     "2021-01-27",
+     "2021-03-17",
+     "2021-04-28",
+     "2021-06-16",
+     "2021-07-28",
+     "2021-09-22",
+     "2021-11-03",
+     "2021-12-15",
+     "2022-01-26",
+     "2022-03-16",
+     "2022-05-04",
+     "2022-06-15",
+     "2022-07-27",
+     "2022-09-21",
+     "2022-11-02",
+     "2022-12-14",
+     "2023-02-01",
+     "2023-03-22",
+     "2023-05-03",
+     "2023-06-14",
+     "2023-07-26",
+     "2023-09-20",
+     "2023-11-01",
+     "2023-12-13",
+     "2024-01-31",
+     "2024-03-20",
+     "2024-05-01",
+     "2024-06-12",
+     "2024-07-31",
+     "2024-09-18",
+     "2024-11-07",
+     "2024-12-18",
+     "2025-01-29",
+     "2025-03-19",
+     "2025-05-07",
+     "2025-06-18",
+     "2025-07-30",
+     "2025-09-17",
+     "2025-10-29",
+     "2025-12-10",
+     "2026-01-28",
+     "2026-03-18",
+     "2026-04-29",
+     "2026-06-17",
+     "2026-07-29",
+     "2026-09-16"
+    ]
+   },
+   "cache": "bench/out/local-2026-09-22/cache-diffusiongemma-fed-whole",
+   "started": "2026-09-22T22:13:12-04:00",
+   "ended": "2026-09-22T22:29:00-04:00",
+   "seconds": 948.0,
+   "exit": 0,
+   "texts": 95,
+   "scored": 95,
+   "stats": "jsort: 95 texts, 475 comparisons in 12 rounds; reliability 0.92; first-position lean -0.19; 475 calls, 0 cached; 1,478,830 tokens; $0.0000; 947.8s",
+   "comparisons": 475,
+   "rounds": 12,
+   "reliability": 0.92,
+   "lean": -0.19,
+   "calls": 475,
+   "cached": 0,
+   "retries": null,
+   "tokens": 1478830,
+   "cost": 0.0,
+   "jsort_seconds": 947.8,
+   "failed_comparisons": 0,
+   "notes": [],
+   "sample_errors": [],
+   "provenance": {
+    "answers": 475,
+    "origins": {
+     "diffusiongemma|openjev-0.1|openjev-0.1": 475
+    }
+   },
+   "vs_jev": {
+    "n": 95,
+    "spearman": 0.893379059350504,
+    "pearson": 0.9430686835656837
+   },
+   "same_day": {
+    "n": 95,
+    "of": 95,
+    "spearman": 0.5986736298449463,
+    "jev_same_statements": 0.4596024155430935,
+    "jev_all_statements_in_run": 0.4596024155430935
+   },
+   "next_180_days": {
+    "n": 91,
+    "of": 91,
+    "spearman": 0.5546566807680228,
+    "jev_same_statements": 0.3728797762963963,
+    "jev_all_statements_in_run": 0.3728797762963963
+   },
+   "seconds_per_comparison": 2.0,
+   "projected_minutes_all_95": 15.8,
+   "statements_within_60_minutes": 95,
+   "attempts": [
+    "diffusiongemma-fed-whole"
+   ],
+   "command": "more hawkish about inflation ...",
+   "raw": {
+    "json": "bench/out/local-2026-09-22/diffusiongemma-fed-whole.json",
+    "log": "bench/out/local-2026-09-22/diffusiongemma-fed-whole.log",
+    "stdout": "bench/out/local-2026-09-22/diffusiongemma-fed-whole.stdout",
+    "stderr": "bench/out/local-2026-09-22/diffusiongemma-fed-whole.stderr",
+    "console": "bench/out/local-2026-09-22/console-diffusiongemma-fed-whole.txt"
+   },
+   "other_server": "loaded but idle (runs strictly serialized, one model and one benchmark at a time)",
+   "checks": {
+    "2026-09-23": {
+     "scored": 95,
+     "action_days": {
+      "n": 32,
+      "spearman": 0.9172
+     },
+     "by_decision": {
+      "cuts": {
+       "n": 11,
+       "mean": -2.0177
+      },
+      "holds": {
+       "n": 63,
+       "mean": -0.731
+      },
+      "hikes": {
+       "n": 21,
+       "mean": 3.25
+      }
+     },
+     "fedlock": {
+      "n": 89,
+      "spearman_m": 0.8592,
+      "spearman_ma": 0.3916
+     }
+    },
+    "2026-09-20": {
+     "scored": 95,
+     "action_days": {
+      "n": 32,
+      "spearman": 0.9172
+     },
+     "by_decision": {
+      "cuts": {
+       "n": 11,
+       "mean": -2.0177
+      },
+      "holds": {
+       "n": 63,
+       "mean": -0.731
+      },
+      "hikes": {
+       "n": 21,
+       "mean": 3.25
+      }
+     },
+     "fedlock": {
+      "n": 92,
+      "spearman_m": 0.9053,
+      "spearman_ma": 0.7372
+     }
+    }
+   }
+  },
+  "diffusiongemma/yc": {
+   "model": "diffusiongemma",
+   "api": "diffusiongemma",
+   "requested_model": "openjev-0.1",
+   "url": "http://127.0.0.1:8080/v1/systemone",
+   "bench": "yc",
+   "tag": "",
+   "stem": "diffusiongemma-yc",
+   "description": "sounds more like science fiction",
+   "k": 10,
+   "jobs": 4,
+   "timeout": 300,
+   "input": {
+    "file": "bench/out/local-2026-09-22/yc-sample500.csv"
+   },
+   "cache": "bench/out/local-2026-09-22/cache-diffusiongemma-yc",
+   "started": "2026-09-22T21:46:05-04:00",
+   "ended": "2026-09-22T21:58:59-04:00",
+   "seconds": 774.2,
+   "exit": 0,
+   "texts": 500,
+   "scored": 500,
+   "stats": "jsort: 500 texts, 2,500 comparisons in 9 rounds; reliability 0.62; first-position lean -0.26; 2,500 calls, 0 cached; 309,641 tokens; $0.0000; 774.1s",
+   "comparisons": 2500,
+   "rounds": 9,
+   "reliability": 0.62,
+   "lean": -0.26,
+   "calls": 2500,
+   "cached": 0,
+   "retries": null,
+   "tokens": 309641,
+   "cost": 0.0,
+   "jsort_seconds": 774.1,
+   "failed_comparisons": 0,
+   "notes": [
+    "jsort: reliability 0.62: two halves of the comparisons give different orders. Raise -k, or reword the description so that any two of these texts can be compared on it"
+   ],
+   "sample_errors": [],
+   "provenance": {
+    "answers": 2500,
+    "origins": {
+     "diffusiongemma|openjev-0.1|openjev-0.1": 2500
+    }
+   },
+   "vs_jev": {
+    "n": 500,
+    "spearman": 0.6538101656978829,
+    "pearson": 0.6574140920958345
+   },
+   "top20_overlap": 4,
+   "top20": [
+    "Canary: Adversarial AI that breaks your AI",
+    "Dispatch: Satellites for Manufacturing in Space",
+    "Button Computer: The tiny computer built for voice AI.",
+    "Human Archive: Physical AI data lab",
+    "Ferveret: Nuclear-inspired cooling that turns wasted power into more AI compute",
+    "Careforce: AI Workers for Healthcare Orgs to Find, Call & Schedule More Patients.",
+    "Cosine: Fully Agentic SWE",
+    "Magic Instruments: Magic Instruments makes a high-tech guitar that is easier and more…",
+    "Flux: Flux is building the payment network for alternative payments in…",
+    "Diffusion Studio: Turn your agent into a professional video editor",
+    "Morphle Labs: Robotic Automation for cancer diagnostics - Robotic Microscopes &…",
+    "Exosonic, Inc.: Developing supersonic UAVs as a pathway to quiet supersonic flight",
+    "Lucidic AI: Reimagining how Machines Learn",
+    "Openland: Messenger for communities",
+    "Stralis Aircraft: Emission free hydrogen electric aircraft",
+    "Waffle: AI generated podcasts",
+    "Random Labs: Random labs is building long running autonomous coding agents.",
+    "Perseus: Applied Lab focused on Search in Latent Spaces.",
+    "Automat: Agentic automation that understands context, recovers, and improves.",
+    "Kitekraft: Building flying wind turbines."
+   ],
+   "jev_top20": [
+    "Greypoint Industries: Building drone swarms that hunt hidden enemies.",
+    "NanoCorp: Autonomous Companies Run by AI Working While You Sleep.",
+    "TareBio: Vaccines for any cancer or infection in weeks.",
+    "Nectome: Human whole body end-of-life preservation for later revival.",
+    "Ferveret: Nuclear-inspired cooling that turns wasted power into more AI compute",
+    "SpaceRyde: The Rocket Network: Sustainable & On-Demand Delivery Anywhere in Space",
+    "Andon Labs: Autonomous organizations without humans in the loop",
+    "Maya Labs: Building self-programming machines",
+    "Nanograb: Deliver genes to any cell with AI",
+    "Hop Aero: Rocket cargo delivery to contested environments",
+    "Phiar: We are developing a revolutionary AI-powered augmented reality…",
+    "Canary: Adversarial AI that breaks your AI",
+    "Lucidic AI: Reimagining how Machines Learn",
+    "CellType: The agentic drug company. We simulate human biology.",
+    "AstroForge: We Mine Asteroids",
+    "Basalt: Constellations as a Service",
+    "JetPack Aviation: Flying motorcycles",
+    "AuroraQ: Building the first practical, integrated quantum computer.",
+    "Absurd: The Creative OS for AI video",
+    "Dispatch: Satellites for Manufacturing in Space"
+   ],
+   "attempts": [
+    "diffusiongemma-yc"
+   ],
+   "command": "sounds more like science fiction ...",
+   "raw": {
+    "json": "bench/out/local-2026-09-22/diffusiongemma-yc.json",
+    "log": "bench/out/local-2026-09-22/diffusiongemma-yc.log",
+    "stdout": "bench/out/local-2026-09-22/diffusiongemma-yc.stdout",
+    "stderr": "bench/out/local-2026-09-22/diffusiongemma-yc.stderr",
+    "console": "bench/out/local-2026-09-22/console-diffusiongemma-yc.txt"
+   },
+   "other_server": "loaded but idle (runs strictly serialized, one model and one benchmark at a time)"
+  },
+  "laya/fed-latest": {
+   "model": "laya",
+   "api": "laya",
+   "requested_model": "laya-421m",
+   "url": "http://127.0.0.1:8081/v1/systemone",
+   "bench": "fed-latest",
+   "tag": "",
+   "stem": "laya-fed-latest",
+   "description": "more hawkish about inflation",
+   "k": 10,
+   "jobs": 4,
+   "timeout": 120,
+   "input": {
+    "file": "bench/out/fed/latest.txt"
+   },
+   "cache": "bench/out/local-2026-09-22/cache-laya-fed-latest",
+   "started": "2026-09-22T22:34:10-04:00",
+   "ended": "2026-09-22T22:34:25-04:00",
+   "seconds": 15.0,
+   "exit": 0,
+   "texts": 51,
+   "scored": 51,
+   "stats": "jsort: 51 texts, 254 comparisons in 10 rounds; reliability 0.37; first-position lean -0.27; 254 calls, 0 cached; 25,157 tokens; $0.0000; 14.9s",
+   "comparisons": 254,
+   "rounds": 10,
+   "reliability": 0.37,
+   "lean": -0.27,
+   "calls": 254,
+   "cached": 0,
+   "retries": null,
+   "tokens": 25157,
+   "cost": 0.0,
+   "jsort_seconds": 14.9,
+   "failed_comparisons": 0,
+   "notes": [
+    "jsort: reliability 0.37: two halves of the comparisons give different orders. Raise -k, or reword the description so that any two of these texts can be compared on it"
+   ],
+   "sample_errors": [],
+   "provenance": {
+    "answers": 254,
+    "origins": {
+     "laya|laya-421m|laya-421m": 254
+    }
+   },
+   "laya_requests": 254,
+   "laya_rejected": 0,
+   "laya_statuses": {
+    "ok": 254
+   },
+   "vs_jev": {
+    "n": 51,
+    "spearman": -0.11049773755656109,
+    "pearson": -0.14820530647024613
+   },
+   "top10_overlap": 1,
+   "top6": [
+    "Today’s policy action will support a timelier return to the Committee’s 2 percent goal.",
+    "And a good majority of my colleagues and I thought the wiser course then would be to await new information in the inter-meeting period.",
+    "Last month in Wyoming, I expressed my commitment to a monetary policy discipline, not to a decision.",
+    "Job gains have kept pace with the workforce, and the unemployment rate has changed little.",
+    "Core PCE and CPI prices are running at about 3.2 percent and 2.4 percent respectively.",
+    "As noted in the Policy Statement, released just a short while ago, economic activity is expanding at a solid pace."
+   ],
+   "jev_top6": [
+    "The plain fact is that inflation is too high and has been for too long.",
+    "I defined the standard for action: We must be confident that underlying inflation is moving to our objective, clearly and at sufficient speed.",
+    "Yet for more than five years, inflation has been running above target.",
+    "Too many categories are still posting increases above 3 percent, on both a 6- and 12-month basis.",
+    "In the meeting just concluded, the FOMC decided to raise the target range for the federal funds rate by ¼ percentage point to 3¾ to 4 percent, in support of the Federal Reserve’s dual mandate.",
+    "The committee’s unanimous vote shows our resolve to achieve price stability on a timelier basis."
+   ],
+   "attempts": [
+    "laya-fed-latest"
+   ],
+   "command": "more hawkish about inflation ...",
+   "raw": {
+    "json": "bench/out/local-2026-09-22/laya-fed-latest.json",
+    "log": "bench/out/local-2026-09-22/laya-fed-latest.log",
+    "stdout": "bench/out/local-2026-09-22/laya-fed-latest.stdout",
+    "stderr": "bench/out/local-2026-09-22/laya-fed-latest.stderr",
+    "console": "bench/out/local-2026-09-22/console-laya-fed-latest.txt"
+   },
+   "other_server": "loaded but idle (runs strictly serialized, one model and one benchmark at a time)"
+  },
+  "laya/fed-whole": {
+   "model": "laya",
+   "api": "laya",
+   "requested_model": "laya-421m",
+   "url": "http://127.0.0.1:8081/v1/systemone",
+   "bench": "fed-whole",
+   "tag": "",
+   "stem": "laya-fed-whole",
+   "description": "more hawkish about inflation",
+   "k": 10,
+   "jobs": 4,
+   "timeout": 120,
+   "input": {
+    "of": 95,
+    "dates": [
+     "2011-04-27",
+     "2011-06-22",
+     "2011-11-02",
+     "2012-01-25",
+     "2012-04-25",
+     "2012-06-20",
+     "2012-09-13",
+     "2012-12-12",
+     "2013-03-20",
+     "2013-06-19",
+     "2013-09-18",
+     "2013-12-18",
+     "2014-03-19",
+     "2014-06-18",
+     "2014-09-17",
+     "2014-12-17",
+     "2015-03-18",
+     "2015-06-17",
+     "2015-09-17",
+     "2015-12-16",
+     "2016-03-16",
+     "2016-06-15",
+     "2016-09-21",
+     "2016-12-14",
+     "2017-03-15",
+     "2017-06-14",
+     "2017-09-20",
+     "2017-12-13",
+     "2018-03-21",
+     "2018-06-13",
+     "2018-09-26",
+     "2018-12-19",
+     "2019-01-30",
+     "2019-03-20",
+     "2019-05-01",
+     "2019-06-19",
+     "2019-07-31",
+     "2019-09-18",
+     "2019-10-30",
+     "2019-12-11",
+     "2020-01-29",
+     "2020-03-03",
+     "2020-03-15",
+     "2020-04-29",
+     "2020-06-10",
+     "2020-07-29",
+     "2020-09-16",
+     "2020-11-05",
+     "2020-12-16",
+     "2021-01-27",
+     "2021-03-17",
+     "2021-04-28",
+     "2021-06-16",
+     "2021-07-28",
+     "2021-09-22",
+     "2021-11-03",
+     "2021-12-15",
+     "2022-01-26",
+     "2022-03-16",
+     "2022-05-04",
+     "2022-06-15",
+     "2022-07-27",
+     "2022-09-21",
+     "2022-11-02",
+     "2022-12-14",
+     "2023-02-01",
+     "2023-03-22",
+     "2023-05-03",
+     "2023-06-14",
+     "2023-07-26",
+     "2023-09-20",
+     "2023-11-01",
+     "2023-12-13",
+     "2024-01-31",
+     "2024-03-20",
+     "2024-05-01",
+     "2024-06-12",
+     "2024-07-31",
+     "2024-09-18",
+     "2024-11-07",
+     "2024-12-18",
+     "2025-01-29",
+     "2025-03-19",
+     "2025-05-07",
+     "2025-06-18",
+     "2025-07-30",
+     "2025-09-17",
+     "2025-10-29",
+     "2025-12-10",
+     "2026-01-28",
+     "2026-03-18",
+     "2026-04-29",
+     "2026-06-17",
+     "2026-07-29",
+     "2026-09-16"
+    ]
+   },
+   "cache": "bench/out/local-2026-09-22/cache-laya-fed-whole",
+   "started": "2026-09-22T22:34:29-04:00",
+   "ended": "2026-09-22T22:34:31-04:00",
+   "seconds": 1.8,
+   "exit": 2,
+   "texts": 95,
+   "scored": 0,
+   "stats": "jsort: 95 texts, 0 comparisons in 10 rounds; 0 calls, 0 cached; 1.7s",
+   "comparisons": 0,
+   "rounds": 10,
+   "reliability": null,
+   "lean": null,
+   "calls": 0,
+   "cached": 0,
+   "retries": null,
+   "tokens": null,
+   "cost": null,
+   "jsort_seconds": 1.7,
+   "failed_comparisons": 474,
+   "notes": [
+    "jsort: 95 texts were never compared and are listed last"
+   ],
+   "sample_errors": [
+    "jsort: a comparison failed: HTTP 422: State exceeds the Laya context budget; use shorter records or explicitly enable audited truncation",
+    "jsort: a comparison failed: HTTP 422: State exceeds the Laya context budget; use shorter records or explicitly enable audited truncation",
+    "jsort: a comparison failed: HTTP 422: State exceeds the Laya context budget; use shorter records or explicitly enable audited truncation"
+   ],
+   "provenance": {
+    "answers": 0,
+    "origins": {}
+   },
+   "laya_requests": 474,
+   "laya_rejected": 474,
+   "laya_statuses": {
+    "context_rejected": 474
+   },
+   "vs_jev": {
+    "n": 0,
+    "spearman": null,
+    "pearson": null
+   },
+   "same_day": {
+    "n": 0,
+    "of": 95,
+    "spearman": null,
+    "jev_same_statements": null,
+    "jev_all_statements_in_run": 0.4596024155430935
+   },
+   "next_180_days": {
+    "n": 0,
+    "of": 91,
+    "spearman": null,
+    "jev_same_statements": null,
+    "jev_all_statements_in_run": 0.3728797762963963
+   },
+   "attempts": [
+    "laya-fed-whole"
+   ],
+   "command": "more hawkish about inflation ...",
+   "raw": {
+    "json": "bench/out/local-2026-09-22/laya-fed-whole.json",
+    "log": "bench/out/local-2026-09-22/laya-fed-whole.log",
+    "stdout": "bench/out/local-2026-09-22/laya-fed-whole.stdout",
+    "stderr": "bench/out/local-2026-09-22/laya-fed-whole.stderr",
+    "console": "bench/out/local-2026-09-22/console-laya-fed-whole.txt"
+   },
+   "other_server": "loaded but idle (runs strictly serialized, one model and one benchmark at a time)",
+   "checks": {
+    "2026-09-23": {
+     "scored": 0,
+     "action_days": {
+      "n": 0,
+      "spearman": null
+     },
+     "by_decision": {
+      "cuts": {
+       "n": 0,
+       "mean": null
+      },
+      "holds": {
+       "n": 0,
+       "mean": null
+      },
+      "hikes": {
+       "n": 0,
+       "mean": null
+      }
+     },
+     "fedlock": {
+      "n": 0,
+      "spearman_m": null,
+      "spearman_ma": null
+     }
+    },
+    "2026-09-20": {
+     "scored": 0,
+     "action_days": {
+      "n": 0,
+      "spearman": null
+     },
+     "by_decision": {
+      "cuts": {
+       "n": 0,
+       "mean": null
+      },
+      "holds": {
+       "n": 0,
+       "mean": null
+      },
+      "hikes": {
+       "n": 0,
+       "mean": null
+      }
+     },
+     "fedlock": {
+      "n": 0,
+      "spearman_m": null,
+      "spearman_ma": null
+     }
+    }
+   }
+  },
+  "laya/yc": {
+   "model": "laya",
+   "api": "laya",
+   "requested_model": "laya-421m",
+   "url": "http://127.0.0.1:8081/v1/systemone",
+   "bench": "yc",
+   "tag": "",
+   "stem": "laya-yc",
+   "description": "sounds more like science fiction",
+   "k": 10,
+   "jobs": 4,
+   "timeout": 120,
+   "input": {
+    "file": "bench/out/local-2026-09-22/yc-sample500.csv"
+   },
+   "cache": "bench/out/local-2026-09-22/cache-laya-yc",
+   "started": "2026-09-22T22:33:13-04:00",
+   "ended": "2026-09-22T22:34:04-04:00",
+   "seconds": 51.2,
+   "exit": 0,
+   "texts": 500,
+   "scored": 500,
+   "stats": "jsort: 500 texts, 2,500 comparisons in 9 rounds; reliability 0.45; first-position lean -0.19; 2,500 calls, 0 cached; 201,995 tokens; $0.0000; 51.0s",
+   "comparisons": 2500,
+   "rounds": 9,
+   "reliability": 0.45,
+   "lean": -0.19,
+   "calls": 2500,
+   "cached": 0,
+   "retries": null,
+   "tokens": 201995,
+   "cost": 0.0,
+   "jsort_seconds": 51.0,
+   "failed_comparisons": 0,
+   "notes": [
+    "jsort: reliability 0.45: two halves of the comparisons give different orders. Raise -k, or reword the description so that any two of these texts can be compared on it"
+   ],
+   "sample_errors": [],
+   "provenance": {
+    "answers": 2500,
+    "origins": {
+     "laya|laya-421m|laya-421m": 2500
+    }
+   },
+   "laya_requests": 2500,
+   "laya_rejected": 0,
+   "laya_statuses": {
+    "ok": 2500
+   },
+   "vs_jev": {
+    "n": 500,
+    "spearman": -0.12925302182866766,
+    "pearson": -0.11529538302308573
+   },
+   "top20_overlap": 0,
+   "top20": [
+    "FlyCode: Recover failed subscription payments to increase retention and LTV",
+    "Tappity: World's largest library of interactive lessons for kids",
+    "NODI Energy: Distributed energy infrastructure unlocking grid power to data centers",
+    "Cognito: Frictionless, modern identity verification that starts with just a…",
+    "AthenaHQ: Be the Answer in AI Search - AI SEO across SEO, GEO & AEO",
+    "99minutos: The fastest shipping for online shopping",
+    "Prayas Analytics: A/B testing for brick-and-mortar stores.",
+    "Outfit: DIY renovations in a box. Materials, tools, and instructions delivered",
+    "BoldVoice: Speech and accent coaching app for non-native English speakers",
+    "Glasskube: Ship self-hosted software with Distr",
+    "jEugene: jEugene highlights undefined terms and unused definitions in legal…",
+    "GiveMeTap: We produce & sell stainless steel water bottles that enables people…",
+    "Littio: Dollar banking for people in Latin America",
+    "TYBR Health: Natural hydrogel to keep internal organs scar-free after surgery",
+    "Sherloq: One place for all your queries, directly on your SQL editor",
+    "SwiftSku: Management and analytics software for convenience stores",
+    "Birch Biosciences: We recycle plastic using engineered enzymes",
+    "Revel: We Deserve More in Midlife",
+    "AgentPhone: Phone Numbers for AI Agents",
+    "Flok: End to end company retreat planning"
+   ],
+   "jev_top20": [
+    "Greypoint Industries: Building drone swarms that hunt hidden enemies.",
+    "NanoCorp: Autonomous Companies Run by AI Working While You Sleep.",
+    "TareBio: Vaccines for any cancer or infection in weeks.",
+    "Nectome: Human whole body end-of-life preservation for later revival.",
+    "Ferveret: Nuclear-inspired cooling that turns wasted power into more AI compute",
+    "SpaceRyde: The Rocket Network: Sustainable & On-Demand Delivery Anywhere in Space",
+    "Andon Labs: Autonomous organizations without humans in the loop",
+    "Maya Labs: Building self-programming machines",
+    "Nanograb: Deliver genes to any cell with AI",
+    "Hop Aero: Rocket cargo delivery to contested environments",
+    "Phiar: We are developing a revolutionary AI-powered augmented reality…",
+    "Canary: Adversarial AI that breaks your AI",
+    "Lucidic AI: Reimagining how Machines Learn",
+    "CellType: The agentic drug company. We simulate human biology.",
+    "AstroForge: We Mine Asteroids",
+    "Basalt: Constellations as a Service",
+    "JetPack Aviation: Flying motorcycles",
+    "AuroraQ: Building the first practical, integrated quantum computer.",
+    "Absurd: The Creative OS for AI video",
+    "Dispatch: Satellites for Manufacturing in Space"
+   ],
+   "attempts": [
+    "laya-yc"
+   ],
+   "command": "sounds more like science fiction ...",
+   "raw": {
+    "json": "bench/out/local-2026-09-22/laya-yc.json",
+    "log": "bench/out/local-2026-09-22/laya-yc.log",
+    "stdout": "bench/out/local-2026-09-22/laya-yc.stdout",
+    "stderr": "bench/out/local-2026-09-22/laya-yc.stderr",
+    "console": "bench/out/local-2026-09-22/console-laya-yc.txt"
+   },
+   "other_server": "loaded but idle (runs strictly serialized, one model and one benchmark at a time)"
+  }
+ }
+}
