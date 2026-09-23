@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
+- The tool itself is unchanged from 0.3.0; this release brings its README on PyPI up to date.
 - Compare the two local servers with Jev 1.13 in `docs/benchmarks/local-models-2026-09-22.md`,
   summarized in the README. The readability comparison moves there from `docs/three-models-2026-09-22.md`.
 - Add `bench/local_models.py`, which runs the YC and Fed sorts on a local server and scores them
