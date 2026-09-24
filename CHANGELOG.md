@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Add `--api gliner`, a local [GLiNER2.5-Decide](https://huggingface.co/fastino/GLiNER2.5-Decide)
   server (`JEV_GLINER_URL`, port 8082). Requires `jevkit-runtime>=0.3.2`.
