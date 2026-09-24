@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `--api gliner`, a local [GLiNER2.5-Decide](https://huggingface.co/fastino/GLiNER2.5-Decide)
+  server (`JEV_GLINER_URL`, port 8082). Requires `jevkit-runtime>=0.3.2`.
+
 ## 0.3.1
 
 - The tool itself is unchanged from 0.3.0; this release brings its README on PyPI up to date.

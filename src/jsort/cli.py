@@ -53,8 +53,8 @@ def parser() -> argparse.ArgumentParser:
                "Jev is reached through TypeSafe's API (TYPESAFE_API_KEY), OpenRouter (OPENROUTER_API_KEY) or a\n"
                "System One gateway of your own (JEV_GATEWAY_URL and JEV_GATEWAY_API_KEY).\n"
                f"Keys can also live in {Settings.from_env().config_dir}/typesafe.key, openrouter.key or gateway.key.\n"
-               "Local servers: --api diffusiongemma (OpenJev, JEV_DIFFUSIONGEMMA_URL) or --api laya (laya-mlx, JEV_LAYA_URL),\n"
-               "never chosen automatically, no key needed, $0 API fees; see the jevkit-runtime docs to run them.")
+               "Local servers: --api diffusiongemma (OpenJev, JEV_DIFFUSIONGEMMA_URL), --api laya (laya-mlx, JEV_LAYA_URL)\n"
+               "or --api gliner (GLiNER2.5-Decide, JEV_GLINER_URL), never chosen automatically, no key needed, $0 API fees; see the jevkit-runtime docs to run them.")
     ap.add_argument("args", nargs="*", help=argparse.SUPPRESS)
     ap.add_argument("-k", "--per-item", type=int, default=10, metavar="N",
                     help="comparisons each text takes part in (default 10); the run asks about half that many "
