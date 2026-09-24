@@ -2,4 +2,4 @@
 
 from jevkit_runtime import catalog
 
-PROVIDERS = catalog("typesafe", "openrouter", "gateway", "diffusiongemma", "laya")
+PROVIDERS = catalog("typesafe", "openrouter", "gateway", "diffusiongemma", "laya", "gliner")

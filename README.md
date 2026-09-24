@@ -68,12 +68,12 @@ saved scale can say who answered.
 
 ### Local servers (experimental)
 
-`--api diffusiongemma` and `--api laya` send the same comparisons to a System One server on your own
-machine, an [OpenJev](https://github.com/razorback16/openjev) or
-[laya-mlx](https://github.com/mizorewww/laya-mlx) process that you run separately. They are never
+`--api diffusiongemma`, `--api laya` and `--api gliner` send the same comparisons to a System One server on your own
+machine, an [OpenJev](https://github.com/razorback16/openjev), [laya-mlx](https://github.com/mizorewww/laya-mlx)
+or [GLiNER2.5-Decide](https://huggingface.co/fastino/GLiNER2.5-Decide) process that you run separately. They are never
 chosen automatically, need no key, and count as $0 in `--stats` and the budget unless
-`JEV_PRICE_PER_MTOK` is set. The runtime's [DiffusionGemma](https://github.com/keltokhy/jevkit-core/blob/main/docs/diffusiongemma.md)
-and [Laya](https://github.com/keltokhy/jevkit-core/blob/main/docs/laya.md) guides explain the setup;
+`JEV_PRICE_PER_MTOK` is set. The runtime's [DiffusionGemma](https://github.com/keltokhy/jevkit-core/blob/main/docs/diffusiongemma.md),
+[Laya](https://github.com/keltokhy/jevkit-core/blob/main/docs/laya.md) and [GLiNER](https://github.com/keltokhy/jevkit-core/blob/main/docs/gliner.md) guides explain the setup;
 start with `-j 1` and a long `--timeout` while a local model warms up. A scale built on a local
 model names it, so placements are checked against it like any other.
 
