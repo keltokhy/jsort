@@ -117,7 +117,7 @@ wheels = [
 
 [[package]]
 name = "jev-sort"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -148,7 +148,7 @@ dev = [{ name = "pytest", specifier = ">=8" }]
 
 [[package]]
 name = "jevkit-runtime"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "../jevkit-core" }
 dependencies = [
     { name = "httpx" },

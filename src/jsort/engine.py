@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import math
-import os
 from dataclasses import dataclass, field
 from numbers import Integral
 
 import numpy as np
 
-from jevkit_runtime import Client, JevError, JevFatal
+from jevkit_runtime import Budget, Client, JevBudgetExceeded, JevError, JevFatal
+from jevkit_runtime.cli import run_sync
 from .model import Fit, fit, information, reliability, shortfall, standard_errors
 from .scale import DEFAULT_ANCHORS, Scale, build, identity, question  # noqa: F401  (question is part of this module's API)
 from .schedule import Schedule
@@ -54,9 +54,12 @@ class Ranking:
         return build(self, anchors, unit=unit, field=field, any_model=any_model)
 
 
+DEFAULT_BUDGET = 1.0  # dollars: a command that bills per question needs a seat belt
+
+
 async def arank(texts: list[str], description: str, jev: Client, *, per_item: int = 10, top: int | None = None,
-                lowest: bool = False, seed: int = 0, budget: float | None = None, max_chars: int = 8000,
-                concurrency: int = 32, progress=None) -> Ranking:
+                lowest: bool = False, seed: int = 0, max_chars: int = 8000, concurrency: int = 32,
+                budget: Budget | None = None, progress=None) -> Ranking:
     """Place texts on a scale by asking Jev about pairs of them.
 
     per_item is the number of comparisons each text takes part in, so the whole run asks about
@@ -64,7 +67,8 @@ async def arank(texts: list[str], description: str, jev: Client, *, per_item: in
     asked about once that is clear, and the remaining questions go to the ones still in contention.
     With lowest as well, it is the bottom of the scale that is wanted, and the hunt runs the other way.
     Identical and blank texts are handled here: duplicates share one score and blanks get none.
-    budget defaults to $JSORT_BUDGET, else 1.00, per run; 0 disables the limit.
+    Spending is the client's budget, or `budget` for this run alone: a comparison it has no room for is
+    not asked, and the run sorts on the answers it has.
     """
     if not description.strip():
         raise ValueError("description must not be empty")
@@ -74,11 +78,6 @@ async def arank(texts: list[str], description: str, jev: Client, *, per_item: in
             continue
         if not isinstance(value, Integral) or value < minimum:
             raise ValueError(f"{name} must be an integer of at least {minimum}")
-    if budget is None:
-        budget = float(os.environ.get("JSORT_BUDGET") or 1.0)
-    if not math.isfinite(budget) or budget < 0:
-        raise ValueError("budget must be finite and nonnegative")
-    spent = max_call_cost = 0.0
     shown = [t[:max_chars] for t in texts]
     unique: dict[str, int] = {}
     member = [unique.setdefault(t, len(unique)) if t.strip() else -1 for t in shown]
@@ -94,25 +93,15 @@ async def arank(texts: list[str], description: str, jev: Client, *, per_item: in
     sem = asyncio.Semaphore(concurrency)
     total = math.ceil(n * per_item / 2)   # the opening ring alone is two comparisons per text
 
-    def record_cost(cost: float) -> None:
-        nonlocal spent, max_call_cost
-        spent += cost
-        max_call_cost = max(max_call_cost, cost)
-
-    def remaining_budget() -> float:
-        # Roundoff at the limit must not buy an extra request.
-        return 0.0 if math.isclose(spent, budget, rel_tol=1e-12) else budget - spent
-
     async def compare(i: int, j: int):
         async with sem:
             if out.fatal or out.over_budget:
                 return None
-            if budget and remaining_budget() <= 0:
-                out.over_budget = True
-                return None
             try:
-                answer = await jev.ask({"A": items[i], "B": items[j]}, {"q": q}, on_cost=record_cost)
-                return i, j, float(answer["q"]["noul"]), answer.origins["q"].get("resolved_model")
+                answer = await jev.ask({"A": items[i], "B": items[j]}, {"q": q}, budget=budget)
+                return i, j, q.value(answer["q"]), answer.origins["q"].get("resolved_model")
+            except JevBudgetExceeded:
+                out.over_budget = True
             except JevError as e:
                 out.errors.append(str(e))
             except JevFatal as e:
@@ -144,26 +133,13 @@ async def arank(texts: list[str], description: str, jev: Client, *, per_item: in
             break
         out.rounds += 1
         scheduled += len(pairs)
-        offset = 0
-        while offset < len(pairs) and not (out.fatal or out.over_budget):
-            size = len(pairs) - offset
-            if budget:
-                remaining = remaining_budget()
-                if remaining <= 0:
-                    out.over_budget = True
-                    break
-                # Learn the price with one request, then reserve the largest observed charge per
-                # in-flight request. A final request or an unexpected price increase can still overshoot.
-                cost = max_call_cost
-                size = min(concurrency, max(1, int(remaining / cost))) if cost else 1
-            batch = pairs[offset:offset + size]
-            offset += len(batch)
-            for result in await asyncio.gather(*(compare(i, j) for i, j in batch)):
-                if result is not None:
-                    first.append(result[0])
-                    second.append(result[1])
-                    ys.append(result[2])
-                    responders[result[3]] = responders.get(result[3], 0) + 1
+        # The client's budget sets each comparison's price aside before it goes out, so the round can go at once.
+        for result in await asyncio.gather(*(compare(i, j) for i, j in pairs)):
+            if result is not None:
+                first.append(result[0])
+                second.append(result[1])
+                ys.append(result[2])
+                responders[result[3]] = responders.get(result[3], 0) + 1
         fitted = fit(n, first, second, ys, start=fitted)
         if progress:
             progress(scheduled, total)
@@ -180,13 +156,14 @@ async def arank(texts: list[str], description: str, jev: Client, *, per_item: in
         out.lean = float(1 / (1 + math.exp(-fitted.gamma)) - 0.5)
         out.gamma = float(fitted.gamma)
         out.reliability = reliability(n, first, second, ys, seed=seed)
-        out.run = {"description": description, "question": q, "model": identity(jev, responders), "max_chars": max_chars,
+        out.run = {"description": description, "question": q.body(), "model": identity(jev, responders), "max_chars": max_chars,
                    "per_item": per_item, "seed": seed, "top": top, "texts": shown}
     return out
 
 
 def rank(texts: list[str], description: str, *, api: str | None = None, model: str | None = None,
-         cache: bool = True, timeout: float = 15.0, transport=None, **options) -> Ranking:
+         cache: bool = True, timeout: float = 15.0, budget: float | Budget | None = None, transport=None,
+         **options) -> Ranking:
     """The same as the command line, from Python. Keys are found the way the command finds them.
 
         import jsort
@@ -194,29 +171,25 @@ def rank(texts: list[str], description: str, *, api: str | None = None, model: s
         for i in r.order()[:5]:
             print(f"{r.score[i]:6.2f} ±{r.se[i]:.2f}  {statements[i]}")
 
-    Spending stops at `budget` dollars, which defaults as the command's does: $JSORT_BUDGET, else 1.00, and
-    0 for no limit. `r.over_budget` says whether it was reached. Other options are arank's.
+    `budget` is dollars (math.inf for no limit, 0 to answer only from the cache) or a runtime Budget; it
+    defaults as the command's does, to $JEV_BUDGET, else 1.00. `r.over_budget` says whether it was reached.
+    Other options are arank's.
     """
-    import concurrent.futures
-
     from jevkit_runtime import AnswerStore, resolve
     from .core import PROVIDERS
 
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and greater than 0")
+    budget = budget if isinstance(budget, Budget) else (
+        Budget.from_settings(DEFAULT_BUDGET) if budget is None else Budget(budget))
 
     async def go() -> Ranking:
         backend = resolve(PROVIDERS, api, model=model)
         jev = Client(backend, timeout=timeout, concurrency=options.get("concurrency", 32),
-                  store=AnswerStore() if cache else None, transport=transport)
+                     store=AnswerStore() if cache else None, budget=budget, transport=transport)
         try:
             return await arank(texts, description, jev, **options)
         finally:
             await jev.close()
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(go())
-    with concurrent.futures.ThreadPoolExecutor(1) as pool:   # a notebook already has a loop running
-        return pool.submit(asyncio.run, go()).result()
+    return run_sync(go())

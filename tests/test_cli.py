@@ -39,7 +39,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    for name in ("TYPESAFE_API_KEY", "JEV_API", "JEV_MODEL", "JEV_URL", "JSORT_BUDGET",
+    for name in ("TYPESAFE_API_KEY", "JEV_API", "JEV_MODEL", "JEV_URL", "JEV_BUDGET",
                  "JEV_GATEWAY_URL", "JEV_GATEWAY_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
@@ -281,9 +281,11 @@ def test_awkward_csv_files(tmp_path):
     code, out, _, _ = run(["x", bom, "--csv", "--field", "note"])
     assert code == 0 and out == "note,id\nv=2,2\nv=1,1\n"
 
+    # A field past the csv module's default size limit still reads; Jev is shown its first --max-chars.
     long = write(tmp_path, "l.csv", f"id,note\n1,v=1 {'x' * 200_000}\n2,v=2\n")
-    code, out, err, _ = run(["x", long, "--csv", "--field", "note", "--max-chars", "300000"])
+    code, out, err, _ = run(["x", long, "--csv", "--field", "note"])
     assert code == 0 and [r[0] for r in csv.reader(io.StringIO(out))] == ["id", "2", "1"]
+    assert "compared only the first 8,000 characters of 1 texts" in err
 
     empty = write(tmp_path, "e.csv", "id,note\n")
     assert run(["x", empty, "--csv", "--field", "note", "-o"])[:2] == (0, "id,note,jsort_score,jsort_se,jsort_n\n")
@@ -315,7 +317,7 @@ def test_python_api(tmp_path):
     # The command's seat belt applies here too, and the options the command has are accepted.
     r = jsort.rank(LINES, "x", transport=httpx.MockTransport(Fake(cost=0.2)), timeout=5, cache=False, concurrency=1)
     assert r.over_budget and r.asked == 5
-    r = jsort.rank(LINES, "x", transport=httpx.MockTransport(Fake(cost=0.2)), budget=0, cache=False)
+    r = jsort.rank(LINES, "x", transport=httpx.MockTransport(Fake(cost=0.2)), budget=math.inf, cache=False)
     assert not r.over_budget and r.asked > 5
 
     async def inside_a_running_loop():                    # as in a notebook

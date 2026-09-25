@@ -6,7 +6,9 @@ import json
 import httpx
 import pytest
 
-from jevkit_runtime import Backend, Client
+import math
+
+from jevkit_runtime import Backend, Budget, Client
 from jsort.engine import arank
 
 
@@ -30,9 +32,10 @@ class ChargedEndpoint:
             self.active -= 1
 
 
-def run(endpoint, **options):
+def run(endpoint, budget=None, **options):
     async def go():
-        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(endpoint))
+        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-1.13.0", key="test-key"),
+                     budget=budget or Budget(), transport=httpx.MockTransport(endpoint))
         try:
             result = await arank([str(i) for i in range(40)], "higher", jev, **options)
             return result, jev.meter.cost
@@ -41,45 +44,50 @@ def run(endpoint, **options):
     return asyncio.run(go())
 
 
-def test_concurrent_requests_respect_the_remaining_budget():
+def test_the_first_charge_is_learned_alone_and_no_request_goes_past_the_budget():
     endpoint = ChargedEndpoint(0.01)
-    result, spent = run(endpoint, budget=0.02)
+    result, spent = run(endpoint, budget=Budget(0.02))
     assert result.over_budget and result.asked == endpoint.calls == 2
     assert spent == pytest.approx(0.02)
 
 
 def test_budget_keeps_parallelism_when_there_is_room():
     endpoint = ChargedEndpoint(0.001)
-    result, spent = run(endpoint, budget=1.0, per_item=2)
+    result, spent = run(endpoint, budget=Budget(1.0), per_item=2)
     assert not result.over_budget and result.asked == 40
     assert spent == pytest.approx(0.04) and endpoint.peak > 1
 
 
 @pytest.mark.parametrize("configured,expected", [(None, 1.0), ("0.4", 0.4)])
-def test_arank_uses_the_default_or_environment_budget(monkeypatch, configured, expected):
-    monkeypatch.delenv("JSORT_BUDGET", raising=False)
+def test_rank_uses_the_default_or_environment_budget(monkeypatch, tmp_path, configured, expected):
+    import jsort
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    for name in ("TYPESAFE_API_KEY", "JEV_API", "JEV_BUDGET"):
+        monkeypatch.delenv(name, raising=False)
     if configured is not None:
-        monkeypatch.setenv("JSORT_BUDGET", configured)
+        monkeypatch.setenv("JEV_BUDGET", configured)
     endpoint = ChargedEndpoint(0.2)
-    result, spent = run(endpoint)
-    assert result.over_budget and spent == pytest.approx(expected)
+    result = jsort.rank([str(i) for i in range(40)], "higher", transport=httpx.MockTransport(endpoint), cache=False)
+    assert result.over_budget and endpoint.calls * 0.2 == pytest.approx(expected)
 
 
-def test_explicit_zero_budget_is_unlimited(monkeypatch):
-    monkeypatch.setenv("JSORT_BUDGET", "0.4")
+def test_an_unlimited_budget_spends_what_the_run_takes():
     endpoint = ChargedEndpoint(0.2)
-    result, spent = run(endpoint, budget=0, per_item=2)
+    result, spent = run(endpoint, budget=Budget(math.inf), per_item=2)
     assert not result.over_budget and result.asked == 40
     assert spent == pytest.approx(8.0) and endpoint.peak > 1
 
 
-def test_budget_is_per_run_when_reusing_a_client():
+def test_a_run_can_bring_its_own_budget_to_a_shared_client():
     async def go():
         endpoint = ChargedEndpoint(0.01)
-        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(endpoint))
+        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-1.13.0", key="test-key"),
+                     transport=httpx.MockTransport(endpoint))
         try:
             for _ in range(5):
-                result = await arank([str(i) for i in range(10)], "higher", jev, budget=0.02)
+                result = await arank([str(i) for i in range(10)], "higher", jev, budget=Budget(0.02))
                 assert result.over_budget and result.asked == 2
             assert jev.meter.cost == pytest.approx(0.10)
         finally:
@@ -90,10 +98,11 @@ def test_budget_is_per_run_when_reusing_a_client():
 def test_concurrent_rankings_have_independent_budgets():
     async def go():
         endpoint = ChargedEndpoint(0.01)
-        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(endpoint))
+        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-1.13.0", key="test-key"),
+                     transport=httpx.MockTransport(endpoint))
         try:
             results = await asyncio.gather(*(
-                arank([f"{prefix}{i}" for i in range(10)], "higher", jev, budget=0.02)
+                arank([f"{prefix}{i}" for i in range(10)], "higher", jev, budget=Budget(0.02))
                 for prefix in ("a", "b")
             ))
             assert all(r.over_budget and r.asked == 2 for r in results)
@@ -128,9 +137,7 @@ def test_zero_concurrency_raises_instead_of_hanging():
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("budget", [-1, float("nan"), float("inf")])
+@pytest.mark.parametrize("budget", [-1, float("nan"), True])
 def test_invalid_budgets_fail_before_any_request(budget):
-    endpoint = ChargedEndpoint(0.01)
     with pytest.raises(ValueError, match="budget"):
-        run(endpoint, budget=budget)
-    assert endpoint.calls == 0
+        Budget(budget)
