@@ -29,7 +29,7 @@ class SimulatedJev:
         e = np.random.default_rng(zlib.crc32(f"{a},{b}".encode())).standard_normal() * self.quirk
         return 1 / (1 + math.exp(-(self.theta[a] - self.theta[b] + self.gamma + e)))
 
-    async def ask(self, state, questions, *, on_cost=None):
+    async def ask(self, state, questions, **_):
         answer = {"q": {"type": "noul", "noul": self.p(int(state["A"]), int(state["B"]))}}
         # a saved scale names the model that answered, so the judge has to have a name
         return Answers(answer, {"q": {"resolved_model": "simulated-judge", "source": "api"}})
@@ -97,7 +97,7 @@ async def main() -> None:
             goal = target(judge, base + held)
             goal -= goal[:base].mean()
             r = await arank(texts[:base], "x", judge, per_item=10, seed=rep)
-            p = await aplace(texts[base:], r.scale(anchors), judge, per_item=per_item, seed=rep, budget=0, any_model=True)
+            p = await aplace(texts[base:], r.scale(anchors), judge, per_item=per_item, seed=rep, any_model=True)
             miss, fitted_miss = p.score - goal[base:], r.score - goal[:base]
             rows.append((p.asked / held, float(np.corrcoef(p.score, goal[base:])[0, 1]), float(np.sqrt(np.mean(miss ** 2))),
                          float(np.mean(np.abs(miss) <= 1.96 * p.se)), float(np.mean(p.beyond != 0)),

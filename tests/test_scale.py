@@ -20,7 +20,7 @@ import pytest
 
 import jsort
 from jsort.cli import main
-from jevkit_runtime import Backend, Client
+from jevkit_runtime import Backend, Budget, Client
 from jsort.placement import aplace
 from jsort.scale import Scale, ScaleError, choose
 
@@ -54,7 +54,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    for name in ("TYPESAFE_API_KEY", "JEV_API", "JEV_MODEL", "JEV_URL", "JSORT_BUDGET",
+    for name in ("TYPESAFE_API_KEY", "JEV_API", "JEV_MODEL", "JEV_URL", "JEV_BUDGET",
                  "JEV_GATEWAY_URL", "JEV_GATEWAY_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
@@ -97,7 +97,7 @@ def test_saving_writes_what_was_asked_of_whom_and_anchors_across_the_range(tmp_p
     assert data["schema_version"] == 1 and data["description"] == DESCRIPTION
     assert data["question"] == {"type": "noul", "instructions": f'Text A ranks higher than text B on this criterion: "{DESCRIPTION}"'}
     assert data["model"] == {"api": "openrouter", "endpoint": "https://openrouter.ai/api/alpha/decisions",
-                             "requested": "~typesafe/jev-latest", "answered": {"typesafe/jev-1.13": 450}, "unknown_answers": 0}
+                             "requested": "typesafe/jev-1.13", "answered": {"typesafe/jev-1.13": 450}, "unknown_answers": 0}
     assert data["input"] == {"max_chars": 8000, "unit": "line", "field": None}
     fit = data["fit"]
     assert fit["texts"] == 90 and fit["comparisons"] == 450 and fit["reliability"] > 0.9 and abs(fit["lean"] + 0.025) < 0.02
@@ -257,7 +257,7 @@ def test_keep_order_holds_the_input_order_and_unordered_does_not(tmp_path, scale
     _, out, _, _ = run(["--scale", scale, held, "--keep-order"], gate=slow_first)
     assert out.splitlines() == apart and apart != by_latent
     # (No budget here: under one, the first text goes alone until its price is known, so it would also finish first.)
-    _, out, _, _ = run(["--scale", scale, held, "--unordered", "--no-cache", "--budget", "0"], gate=slow_first)
+    _, out, _, _ = run(["--scale", scale, held, "--unordered", "--no-cache", "--budget", "none"], gate=slow_first)
     assert sorted(out.splitlines()) == sorted(apart) and out.splitlines()[-1] == HELD[0]
     _, out, _, _ = run(["--scale", scale, held])             # neither: a sort, which has to wait for the end
     assert out.splitlines() == by_latent
@@ -280,7 +280,7 @@ def test_ordered_streaming_bounds_the_texts_in_hand(tmp_path, scale):
             in_hand[0] = len(started)
 
     held = write(tmp_path, "held.txt", "\n".join(HELD[:12]) + "\n")
-    code, out, _, _ = run(["--scale", scale, held, "--keep-order", "-j", "2", "--budget", "0"], gate=slow_first)
+    code, out, _, _ = run(["--scale", scale, held, "--keep-order", "-j", "2", "--budget", "none"], gate=slow_first)
     assert code == 0 and out.splitlines() == HELD[:12]
     assert in_hand == [2]                                    # the slow text and one more: a finished text keeps its slot until it prints
 
@@ -297,7 +297,7 @@ def test_another_model_is_refused_unless_asked_for(tmp_path, scale, monkeypatch)
     held = write(tmp_path, "held.txt", "\n".join(HELD[:3]) + "\n")
     code, out, err, oracle = run(["--scale", scale, held, "--model", "typesafe/jev-2"])
     assert (code, out, oracle.bodies) == (2, "", [])          # refused before anything is asked
-    assert "typesafe/jev-2" in err and "~typesafe/jev-latest" in err and "--any-model" in err
+    assert "typesafe/jev-2" in err and "typesafe/jev-1.13" in err and "--any-model" in err
     assert run(["--scale", scale, held, "--model", "typesafe/jev-2", "--any-model"])[0] == 0
 
     # The alias the scale asked for now reaches a newer model. Only the API's reply can show that.
@@ -390,9 +390,8 @@ def test_k_bounds_the_comparisons_and_nothing_stops_a_text_early(tmp_path, scale
         assert {o["comparisons"] for o in placed(out).values()} == {k} and len(oracle.bodies) == 10 * k
     # Stopping once the reported standard error looks small enough would select for small estimates of it:
     # the option that did so is gone, from the command and from Python.
-    with pytest.raises(SystemExit) as unknown_option:
-        run(["--scale", scale, held, "--se-target", "0.3"])
-    assert unknown_option.value.code == 2
+    code, _, err, _ = run(["--scale", scale, held, "--se-target", "0.3"])
+    assert code == 2 and "unrecognized arguments: --se-target" in err
     with pytest.raises(TypeError):
         jsort.place(HELD[:2], scale, se_target=0.3, transport=httpx.MockTransport(Oracle()))
 
@@ -477,9 +476,10 @@ def test_the_budget_stops_placement_between_texts(tmp_path, scale):
 def test_concurrent_placement_respects_the_remaining_budget(scale):
     async def go(budget, cost=0.01):
         oracle = Oracle(cost=cost)
-        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"), transport=httpx.MockTransport(oracle))
+        jev = Client(Backend("openrouter", "https://fixture.invalid/decisions", "jev-latest", key="test-key"),
+                     budget=Budget(budget), transport=httpx.MockTransport(oracle))
         try:
-            result = await aplace(HELD[:10], scale, jev, budget=budget, any_model=True)
+            result = await aplace(HELD[:10], scale, jev, any_model=True)
             return result, len(oracle.bodies), jev.meter.cost
         finally:
             await jev.close()
@@ -490,7 +490,7 @@ def test_concurrent_placement_respects_the_remaining_budget(scale):
     assert list(result.partial) == [True] + [False] * 9 and np.isnan(result.score[1:]).all()
     result, calls, spent = asyncio.run(go(0.25))
     assert result.over_budget and result.asked == calls == 20 and spent == pytest.approx(0.20) and not result.partial.any()
-    result, calls, spent = asyncio.run(go(0))
+    result, calls, spent = asyncio.run(go(math.inf))
     assert not result.over_budget and result.asked == calls == 100
 
 
@@ -567,7 +567,9 @@ def test_python_api(tmp_path):
 def forget_who_answered(tmp_path):
     """Strip every cached answer of who gave it, as an answer stored without provenance would be."""
     import sqlite3
-    db = sqlite3.connect(tmp_path / "cache" / "jev" / "answers.sqlite", isolation_level=None)
+    from jevkit_runtime import AnswerStore
+
+    db = sqlite3.connect(AnswerStore.default_path(), isolation_level=None)
     count = db.execute("UPDATE answers SET metadata = NULL, at = 1.0").rowcount
     db.close()
     return count
@@ -768,7 +770,7 @@ def test_a_hand_edited_scale_is_refused(tmp_path, scale):
             Scale.load(path)
         code, out, err, oracle = run(["--scale", path, held])
         assert (code, out, oracle.bodies) == (2, "", []) and path in err, complaint
-    assert Scale.load(scale).question == jsort.scale.question(DESCRIPTION) == jsort.engine.question(DESCRIPTION)
+    assert Scale.load(scale).question == jsort.scale.question(DESCRIPTION).body() == jsort.engine.question(DESCRIPTION).body()
 
 
 def test_placement_uses_the_ridge_the_scale_was_fitted_with(tmp_path, scale):
@@ -806,7 +808,7 @@ def test_a_stand_in_judge_can_sort_save_and_place():
     class Judge:
         meter = Meter()
 
-        async def ask(self, state, questions, *, on_cost=None):
+        async def ask(self, state, questions, **_):
             value = lambda t: float(re.search(r"v=(-?[\d.]+)", t).group(1))
             answer = {"q": {"noul": 1 / (1 + math.exp(-(value(state["A"]) - value(state["B"]))))}}
             return Answers(answer, {"q": {"resolved_model": "stand-in", "source": "api"}})
@@ -815,15 +817,14 @@ def test_a_stand_in_judge_can_sort_save_and_place():
         r = await arank(BASE[:30], "x", Judge())
         built = r.scale(10)
         assert built.model["answered"] == {"stand-in": r.asked} and built.answered_by == "stand-in"
-        for budget in (0, 1.0):
-            p = await aplace(HELD[:5], built, Judge(), budget=budget, any_model=True)
-            assert p.asked == 50 and not np.isnan(p.score).any() and not p.partial.any()
+        p = await aplace(HELD[:5], built, Judge(), any_model=True)
+        assert p.asked == 50 and not np.isnan(p.score).any() and not p.partial.any()
 
     asyncio.run(go())
 
 
 @pytest.mark.parametrize("extra", [[], ["--keep-order"], ["--unordered"]])
-@pytest.mark.parametrize("budget", ["0", "1"])
+@pytest.mark.parametrize("budget", ["none", "1"])
 def test_a_moved_alias_sends_one_probe_and_a_cached_rerun_prints_nothing(tmp_path, scale, extra, budget):
     async def delay(body):
         await asyncio.sleep(0.002)       # a concurrent wave can start before the first answer arrives
@@ -847,7 +848,7 @@ def test_cached_matching_answers_do_not_confirm_the_first_live_model(tmp_path, s
 
     held = write(tmp_path, "held.txt", "\n".join(HELD[:20]) + "\n")
     for width in ("1", "32"):
-        code, out, err, oracle = run(["--scale", scale, held, "--json", "--budget", "0", "-j", width],
+        code, out, err, oracle = run(["--scale", scale, held, "--json", "--budget", "none", "-j", width],
                                     model="typesafe/jev-1.14", gate=delay)
         assert code == 2 and out == "" and "typesafe/jev-1.14" in err
         assert len(oracle.bodies) == (1 if width == "1" else 0)
@@ -948,7 +949,7 @@ def test_duplicate_shown_texts_share_one_placement_without_a_cache(tmp_path, sca
 
     text = HELD[0]
     held = write(tmp_path, "copies.txt", "\n".join(text + f" unseen suffix {i}" for i in range(6)) + "\n")
-    code, out, err, oracle = run(["--scale", scale, held, "--json", "--no-cache", "--budget", "0", "-j", width,
+    code, out, err, oracle = run(["--scale", scale, held, "--json", "--no-cache", "--budget", "none", "-j", width,
                                 "--max-chars", str(len(text)), *extra], oracle=Jitter())
     rows = list(map(json.loads, out.splitlines()))
     assert code == 0 and len(rows) == 6, err
@@ -968,3 +969,11 @@ def test_zero_cost_replies_release_the_first_request_gate(scale):
 
     result = jsort.place(HELD[:8], scale, cache=False, concurrency=8, transport=httpx.MockTransport(Oracle(cost=0, gate=delay)))
     assert result.asked == 80 and peak > 1
+
+
+def test_a_zero_budget_places_only_what_the_cache_holds(tmp_path, scale):
+    held = write(tmp_path, "held.txt", "\n".join(HELD[:3]) + "\n")
+    code, _, _, paid = run(["--scale", scale, held, "--json", "--budget", "none"])
+    assert code == 0 and len(paid.bodies) == 30
+    code, out, err, again = run(["--scale", scale, held, "--json", "--budget", "0"])
+    assert code == 0 and not again.bodies and len(placed(out)) == 3

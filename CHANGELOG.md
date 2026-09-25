@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+On `jevkit-runtime` 0.4 ([jevkit-core#14](https://github.com/keltokhy/jevkit-core/issues/14)).
+Breaking for scripts that set a budget.
+
+- The budget is the runtime's: each comparison sets its estimated price aside before it goes out, the
+  first goes alone to learn the price, and comparisons in flight together cannot pass the limit.
+  `--budget none` is no limit and `--budget 0` answers only from the cache (it used to mean no limit).
+  `JEV_BUDGET` replaces `JSORT_BUDGET` and applies to every JevKit tool. In Python, `budget=` takes
+  dollars or a runtime `Budget`, and `arank`/`aplace` take `budget=` for one run on a shared client.
+- Placement on a saved scale still admits whole texts in input order; each takes an allotment of the
+  budget for all its comparisons, priced when it is admitted, and draws on what the budget has free
+  if prices rise.
+- The model is pinned to `jev-1.13.0` (`typesafe/jev-1.13` on OpenRouter). Saved scales keep the model
+  they were built with, so placing on an older scale still asks it.
+- `--record FILE` writes the run's record; runtime warnings (one requested model answered by several,
+  spending past the limit) go to stderr.
+- Streaming placement runs on the runtime's stream; a bad key or a model the scale refuses still stops
+  it at once.
+- A comparison over Jev's documented request limits is refused before it is sent.
+- The cache moves to `~/.cache/jev/answers.v3.sqlite`; the first run after upgrading re-asks.
+
 ## 0.4.0
 
 - Add `--api gliner`, a local [GLiNER2.5-Decide](https://huggingface.co/fastino/GLiNER2.5-Decide)

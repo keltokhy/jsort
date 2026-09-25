@@ -20,25 +20,35 @@ import json
 import math
 import os
 import sys
-import threading
 import time
-from concurrent.futures import CancelledError
+
+from jevkit_runtime import AnswerStore, Budget, Client, JevFatal, Run
+from jevkit_runtime.cli import (
+    Parser,
+    UsageError,
+    add_runtime_args,
+    budget_from_args,
+    providers_help,
+    runtime_from_args,
+    show_stats as stats_wanted,
+    stats_line,
+)
+from jevkit_runtime.run import warnings as run_warnings
+from jevkit_runtime.stream import ordered_map
 
 from . import __version__
-from jevkit_runtime import AnswerStore, Client, JevFatal, Settings, resolve
 from .core import PROVIDERS
-from .engine import Ranking, arank
+from .engine import DEFAULT_BUDGET, Ranking, arank
 from .inputs import Record, read, records as read_records
 from .placement import Placement, Placer, aplace, client_for, collect
 from .scale import DEFAULT_ANCHORS, Scale, ScaleError
 
 MAX_ERRORS_SHOWN = 10
-DEFAULT_BUDGET = 1.0  # dollars, as in jgrep: a command that bills per question needs a seat belt
 SHAKY = 0.8           # below this split-half reliability the order is reported as unsteady
 
 
 def parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(
+    ap = Parser(
         prog="jsort", formatter_class=argparse.RawDescriptionHelpFormatter,
         usage="jsort [options] DESCRIPTION [FILE ...]\n       jsort [options] --scale SCALE [FILE ...]",
         description="Sort lines along a plain-English dimension, from pairwise comparisons judged by TypeSafe's Jev model.",
@@ -50,11 +60,7 @@ def parser() -> argparse.ArgumentParser:
                '  jsort --csv --field narrative -o --keep-order "drew broader participation" events.csv\n'
                '  jsort --save-scale hawkish.json "more hawkish about inflation" statements.txt\n'
                '  tail -f captions.txt | jsort --scale hawkish.json -o --keep-order\n\n'
-               "Jev is reached through TypeSafe's API (TYPESAFE_API_KEY), OpenRouter (OPENROUTER_API_KEY) or a\n"
-               "System One gateway of your own (JEV_GATEWAY_URL and JEV_GATEWAY_API_KEY).\n"
-               f"Keys can also live in {Settings.from_env().config_dir}/typesafe.key, openrouter.key or gateway.key.\n"
-               "Local servers: --api diffusiongemma (OpenJev, JEV_DIFFUSIONGEMMA_URL), --api laya (laya-mlx, JEV_LAYA_URL)\n"
-               "or --api gliner (GLiNER2.5-Decide, JEV_GLINER_URL), never chosen automatically, no key needed, $0 API fees; see the jevkit-runtime docs to run them.")
+               + providers_help(PROVIDERS))
     ap.add_argument("args", nargs="*", help=argparse.SUPPRESS)
     ap.add_argument("-k", "--per-item", type=int, default=10, metavar="N",
                     help="comparisons each text takes part in (default 10); the run asks about half that many "
@@ -94,19 +100,11 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--any-model", action="store_true",
                     help="with --scale, place even though the API, endpoint or model is not the one the scale was built "
                          "with; with --save-scale, save even though the answers do not all name one model")
-    ap.add_argument("-j", "--concurrency", type=int, default=32, metavar="N", help="calls in flight (default 32)")
-    ap.add_argument("--timeout", type=float, default=15.0, metavar="SECONDS",
-                    help="give up on a comparison after this long, retries included (default 15)")
-    ap.add_argument("--budget", type=float, default=None, metavar="DOLLARS",
-                    help="stop asking once this much has been spent and sort on what is known (default 1.00, or "
-                         "$JSORT_BUDGET; 0 for no limit)")
     ap.add_argument("--max-chars", type=int, default=None, metavar="N",
                     help="show Jev only the first N characters of a text (default 8000; with --scale, the scale's)")
-    ap.add_argument("--no-cache", action="store_true", help="do not read or write the answer cache")
-    ap.add_argument("--api", choices=list(PROVIDERS), help="which API to call (default: whichever has a key)")
-    ap.add_argument("--model", metavar="ID", help="model ID to request (default: the API's latest Jev)")
-    ap.add_argument("--stats", action=argparse.BooleanOptionalAction, default=None,
-                    help="print comparisons, reliability, tokens and cost to stderr at the end (default: when stderr is a terminal)")
+    ap.add_argument("--record", metavar="FILE",
+                    help="write the run's record to FILE: what was asked, of which model, at what cost")
+    add_runtime_args(ap, PROVIDERS, default_budget=DEFAULT_BUDGET)
     ap.add_argument("--version", action="version", version=f"jsort {__version__}")
     return ap
 
@@ -179,17 +177,18 @@ def write(records: list[Record], header: list[str] | None, ranking: Ranking, ord
     out.flush()
 
 
-def summary(records: list[Record], ranking: Ranking, jev: Client) -> str:
+def summary(records: list[Record], ranking: Ranking) -> str:
     parts = [f"{len(records):,} texts, {ranking.asked:,} comparisons in {ranking.rounds} rounds"]
     if ranking.reliability is not None:
         parts.append(f"reliability {ranking.reliability:.2f}")
     if ranking.asked:
         parts.append(f"first-position lean {ranking.lean:+.2f}")
-    return "; ".join(parts + [jev.meter.summary()])
+    return "; ".join(parts)
 
 
 def closing_notes(args, scale: Scale | None, *, truncated: int, ragged: int, over_budget: bool, asked: int,
-                  unscored: int, beyond: tuple[int, int], unverified: int = 0, partial: int = 0, err) -> None:
+                  unscored: int, beyond: tuple[int, int], budget: Budget, unverified: int = 0, partial: int = 0,
+                  err) -> None:
     """What the user should know about the run, after the output: the same lines whether it sorted or placed."""
     if ragged:
         print(f"jsort: {ragged:,} rows have more values than the header has columns; the surplus is kept at the end "
@@ -198,11 +197,11 @@ def closing_notes(args, scale: Scale | None, *, truncated: int, ragged: int, ove
         print(f"jsort: compared only the first {args.max_chars:,} characters of {truncated:,} texts; raise --max-chars",
               file=err)
     if over_budget and scale:
-        print(f"jsort: stopped at the ${args.budget:.2f} budget after {asked:,} comparisons: it does not cover another "
+        print(f"jsort: stopped at the ${budget.limit:.2f} budget after {asked:,} comparisons: it does not cover another "
               "text's placement in full, and a text is placed in full or not at all; raise it with --budget, and the "
               "answers so far come back from the cache", file=err)
     elif over_budget:
-        print(f"jsort: stopped asking at the ${args.budget:.2f} budget after {asked:,} comparisons and sorted on those; "
+        print(f"jsort: stopped asking at the ${budget.limit:.2f} budget after {asked:,} comparisons and sorted on those; "
               "raise it with --budget, and the answers so far come back from the cache", file=err)
     if unscored:
         print(f"jsort: {unscored:,} texts " + ("could not be placed and have no score" if scale else
@@ -224,7 +223,12 @@ def closing_notes(args, scale: Scale | None, *, truncated: int, ragged: int, ove
 def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -> int:
     out, err = out or sys.stdout, err or sys.stderr
     ap = parser()
-    args = ap.parse_intermixed_args(argv)
+    try:
+        args = ap.parse_intermixed_args(argv)
+    except UsageError as e:
+        ap.print_usage(err)
+        print(f"jsort: {e}", file=err)
+        return 2
     scale = None
     if args.scale:
         try:
@@ -251,12 +255,11 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         return 2
     else:
         description, files = args.args[0], args.args[1:]
-    if args.budget is None:
-        try:
-            args.budget = float(os.environ.get("JSORT_BUDGET") or DEFAULT_BUDGET)
-        except ValueError:
-            print(f"jsort: JSORT_BUDGET must be a number of dollars; got {os.environ['JSORT_BUDGET']!r}", file=err)
-            return 2
+    try:
+        budget = budget_from_args(args)
+    except JevFatal as e:
+        print(f"jsort: {e}", file=err)
+        return 2
     given_max_chars = args.max_chars
     if args.max_chars is None:
         args.max_chars = scale.max_chars if scale else 8000
@@ -264,10 +267,7 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
         (bool(description.strip()), "the description is empty"),
         (args.per_item >= 2, "-k takes 2 or more comparisons per text; the first round alone gives every text two"),
         (args.top is None or args.top >= 1, "--top takes 1 or more"),
-        (args.concurrency >= 1, "-j takes 1 or more concurrent calls"),
         (args.seed >= 0, "--seed takes 0 or more"),
-        (math.isfinite(args.budget) and args.budget >= 0, "--budget / JSORT_BUDGET must be finite and nonnegative"),
-        (math.isfinite(args.timeout) and args.timeout > 0, "--timeout must be finite and greater than 0"),
         (args.max_chars > 0, "--max-chars must be greater than 0"),
         (not (args.jsonl or args.csv) or bool(args.field), "--jsonl and --csv require --field"),
         (not args.field or args.jsonl or args.csv, "--field requires --jsonl or --csv"),
@@ -293,15 +293,16 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     if scale and given_max_chars not in (None, scale.max_chars):
         print(f"jsort: the scale was built showing Jev the first {scale.max_chars:,} characters of a text; this run "
               f"shows {args.max_chars:,}", file=err)
-    show_stats = args.stats or (args.stats is None and err.isatty())
+    show_stats = stats_wanted(args, err)
+    run = Run("jsort", __version__)
 
     def client() -> Client:
         """The scale's API and model unless others were named. Made inside the running loop, where it is closed."""
         return Client(client_for(scale, args.api, args.model), timeout=args.timeout, concurrency=args.concurrency,
-                   store=None if args.no_cache else AnswerStore(), transport=transport)
+                      store=None if args.no_cache else AnswerStore(), budget=budget, transport=transport)
 
     if scale and (args.keep_order or args.unordered):
-        return stream(args, scale, files, client, show_stats, out, err)
+        return stream(args, scale, files, client, budget, run, show_stats, out, err)
 
     records, header, problems = read(files, args)
     placing = bool(scale)
@@ -343,27 +344,25 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
                 nonlocal jev
                 jev = client()
                 try:
-                    return await aplace(texts, scale, jev, per_item=args.per_item,
-                                        seed=args.seed, budget=args.budget, max_chars=args.max_chars,
-                                        concurrency=args.concurrency, any_model=args.any_model, progress=progress)
+                    return await aplace(texts, scale, jev, per_item=args.per_item, seed=args.seed,
+                                        max_chars=args.max_chars, concurrency=args.concurrency,
+                                        any_model=args.any_model, progress=progress)
                 finally:
                     await jev.close()
     elif len({t for t in shown if t.strip()}) < 2:
         work = None           # nothing to compare, so no key is needed either
     else:
         try:
-            backend = resolve(PROVIDERS, args.api, model=args.model)
+            jev = runtime_from_args(args, PROVIDERS, budget=budget, transport=transport)
         except JevFatal as e:
             print(f"jsort: {e}", file=err)
             return 2
-        jev = Client(backend, timeout=args.timeout, concurrency=args.concurrency,
-                  store=None if args.no_cache else AnswerStore(), transport=transport)
 
         async def work() -> Ranking:
             try:
                 return await arank(texts, description, jev, per_item=args.per_item, top=args.top, lowest=args.reverse,
-                                   seed=args.seed, budget=args.budget, max_chars=args.max_chars,
-                                   concurrency=args.concurrency, progress=progress)
+                                   seed=args.seed, max_chars=args.max_chars, concurrency=args.concurrency,
+                                   progress=progress)
             finally:
                 await jev.close()
 
@@ -423,7 +422,7 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     beyond = (int((ranking.beyond > 0).sum()), int((ranking.beyond < 0).sum())) if placing else (0, 0)
     closing_notes(args, scale, truncated=truncated, ragged=sum(1 for r in records if r.data.get(None)) if args.csv else 0,
                   over_budget=ranking.over_budget, asked=ranking.asked,
-                  unscored=unscored if jev is not None or placing else 0, beyond=beyond,
+                  unscored=unscored if jev is not None or placing else 0, beyond=beyond, budget=budget,
                   unverified=ranking.unverified if placing else 0,
                   partial=int(ranking.partial.sum()) if placing else 0, err=err)
     if ranking.reliability is not None and ranking.reliability < SHAKY:
@@ -436,24 +435,38 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     if saved is not None and show_stats:
         print(f"jsort: saved {len(saved.anchors):,} anchors from {_number(saved.span[0], 2)} to "
               f"{_number(saved.span[1], 2)} in {args.save_scale}", file=err)
+    if jev is not None:
+        record(run, jev, args, description, err)
     if show_stats and jev is not None:
-        line = (f"{len(records):,} texts placed against {len(scale.anchors):,} anchors, {ranking.asked:,} comparisons; "
-                f"{jev.meter.summary()}" if placing else summary(records, ranking, jev))
-        print(f"jsort: {line}; {time.perf_counter() - t0:.1f}s", file=err)
+        line = (f"{len(records):,} texts placed against {len(scale.anchors):,} anchors, {ranking.asked:,} comparisons"
+                if placing else summary(records, ranking))
+        print(f"jsort: {line}; {stats_line(jev, time.perf_counter() - t0)}", file=err)
     failed = problems or ranking.errors or ranking.over_budget or ranking.fatal or (args.save_scale and saved is None)
     return 2 if failed else 0
 
 
-def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, err) -> int:
+def record(run: Run, jev: Client, args, description: str, err) -> None:
+    """The run's record: warnings a person should see, and the file --record asked for."""
+    kept = run.record(jev, fields={"description": description, "per_item": args.per_item, "seed": args.seed,
+                                   "max_chars": args.max_chars, "top": args.top, "scale": args.scale})
+    for warning in run_warnings(kept):
+        print(f"jsort: {warning}", file=err)
+    if args.record:
+        with open(args.record, "w", encoding="utf-8") as f:
+            json.dump(kept, f, ensure_ascii=False, indent=2)
+
+
+def stream(args, scale: Scale, files: list[str], client, budget: Budget, run: Run, show_stats: bool,
+           out, err) -> int:
     """--scale with --keep-order or --unordered: read as the input arrives and print each text once it is placed.
 
-    A placed text's score owes nothing to the rest of the input, so nothing has to wait for the end of it.
-    The shape is jgrep's: a thread reads, -j bounds the texts in hand, and with ordered output a slot
-    stays taken until its text has printed, so a slow first text cannot let the rest run ahead.
+    A placed text's score owes nothing to the rest of the input, so nothing has to wait for the end of it. The
+    runtime's stream reads on a thread and keeps -j texts in hand; with ordered output a slot stays taken until
+    its text has printed, so a slow first text cannot let the rest run ahead.
     """
     writer = Writer(args, out, placing=True)
     known = {a.text: a for a in scale.anchors}
-    s = {"next": 0, "seen": 0, "problems": 0, "fatal": None, "broken_pipe": False, "truncated": 0, "ragged": 0,
+    s = {"seen": 0, "problems": 0, "fatal": None, "truncated": 0, "ragged": 0,
          "unscored": 0, "above": 0, "below": 0, "partial": 0, "jev": None, "placer": None}
     t0 = time.perf_counter()
 
@@ -462,166 +475,90 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
         if s["problems"] <= MAX_ERRORS_SHOWN:
             print(f"jsort: {message}", file=err)
 
-    async def go() -> None:
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue(maxsize=args.concurrency)
-        # A slot covers both a text being placed and its result waiting for ordered output.
-        sem = asyncio.Semaphore(args.concurrency)
-        stop, halt = threading.Event(), asyncio.Event()
-        finished: dict[int, tuple] = {}
-        tasks: set[asyncio.Task] = set()
-        feeding = {"put": None}
-
-        def feed() -> None:
-            def enqueue(item) -> bool:
-                if stop.is_set():
-                    return False
-                put = asyncio.run_coroutine_threadsafe(queue.put(item), loop)
-                feeding["put"] = put
-                # Stop may race with creation of the pending put. Either the consumer
-                # or this check must cancel it so a full queue cannot strand a reader.
-                if stop.is_set():
-                    put.cancel()
-                put.result()
-                return not stop.is_set()
-
-            try:
-                for item in read_records(files, args, stop):
-                    if not enqueue(item):
-                        return
-            except Exception as e:
-                if not stop.is_set():
-                    try:
-                        enqueue(f"input reader: {type(e).__name__}: {e}")
-                    except (CancelledError, RuntimeError):
-                        pass
-            finally:
-                # Even an unexpected reader failure must wake the consumer.
-                if not stop.is_set():
-                    try:
-                        enqueue(None)
-                    except (CancelledError, RuntimeError):
-                        pass
-
-        def emit(rec: Record, score: float, se: float, n: int, beyond: int, partial: bool) -> None:
-            s["seen"] += 1
-            if partial:
-                s["partial"] += 1
-                if s["partial"] <= MAX_ERRORS_SHOWN:
-                    print(f"jsort: {rec.file}:{rec.lineno}: placed on {n:,} comparisons, fewer than -k asked for; its score "
-                          "is not the one a full placement gives", file=err)
-            s["unscored"] += math.isnan(score) and bool(rec.text[:args.max_chars].strip())
-            if beyond:
-                s["above" if beyond > 0 else "below"] += 1
-                if s["above"] + s["below"] <= MAX_ERRORS_SHOWN:   # a live stream has no end at which to say so
-                    low, high = scale.span
-                    print(f"jsort: {rec.file}:{rec.lineno}: " + (f"above every anchor (the highest is {_number(high, 2)})"
-                          if beyond > 0 else f"below every anchor (the lowest is {_number(low, 2)})")
-                          + f"; its score of {_number(score, 2)} is best read as a bound toward the scale", file=err)
-            try:
-                writer.text(rec, None, score, se, n, beyond, partial)
-                out.flush()
-            except BrokenPipeError:
-                s["broken_pipe"] = True
-                halt.set()
-
-        def deliver(seq: int, rec: Record, result: tuple) -> None:
-            if args.unordered:
-                sem.release()
-                return None if s["broken_pipe"] or s["fatal"] else emit(rec, *result)
-            finished[seq] = (rec, *result)
-            while s["next"] in finished and not (s["broken_pipe"] or s["fatal"]):
-                emit(*finished.pop(s["next"]))
-                s["next"] += 1
-                sem.release()
-
-        async def judge(seq: int, rec: Record) -> None:
-            s["truncated"] += len(rec.text) > args.max_chars
-            result, shown = (math.nan, math.nan, 0, 0, False), rec.text[:args.max_chars]
-            try:
-                if shown in known:              # an anchor's score is in the file
-                    result = (known[shown].score, known[shown].se, known[shown].comparisons, 0, False)
-                elif shown.strip():
-                    if s["placer"] is None:     # the first text worth asking about is what needs a key
-                        s["jev"] = s["jev"] or client()
-                        s["placer"] = Placer(scale, s["jev"], per_item=args.per_item,
-                                             seed=args.seed, budget=args.budget, max_chars=args.max_chars,
-                                             concurrency=args.concurrency, any_model=args.any_model)
-                    result = await s["placer"].place(rec.text)
-            except (JevFatal, ScaleError) as e:
-                s["fatal"] = s["fatal"] or str(e)
-            except Exception as e:
-                # Every text needs a result so one failure cannot leave a permanent gap in ordered output.
-                complain(f"{rec.file}:{rec.lineno}: {type(e).__name__}: {e}")
-            placer = s["placer"]
-            if placer is not None and placer.fatal:
-                s["fatal"] = s["fatal"] or placer.fatal
-            deliver(seq, rec, result)
-            if s["fatal"] or (placer is not None and placer.over_budget):
-                halt.set()
-
-        def completed(task: asyncio.Task) -> None:
-            tasks.discard(task)
-            if not task.cancelled() and (error := task.exception()) is not None:
-                s["fatal"] = s["fatal"] or f"{type(error).__name__}: {error}"
-                halt.set()
-
-        threading.Thread(target=feed, daemon=True).start()
-        halted = asyncio.ensure_future(halt.wait())
-        seq = 0
+    def emit(rec: Record, score: float, se: float, n: int, beyond: int, partial: bool) -> bool:
+        """Print a placed text; True when the reader has gone."""
+        s["seen"] += 1
+        if partial:
+            s["partial"] += 1
+            if s["partial"] <= MAX_ERRORS_SHOWN:
+                print(f"jsort: {rec.file}:{rec.lineno}: placed on {n:,} comparisons, fewer than -k asked for; its score "
+                      "is not the one a full placement gives", file=err)
+        s["unscored"] += math.isnan(score) and bool(rec.text[:args.max_chars].strip())
+        if beyond:
+            s["above" if beyond > 0 else "below"] += 1
+            if s["above"] + s["below"] <= MAX_ERRORS_SHOWN:   # a live stream has no end at which to say so
+                low, high = scale.span
+                print(f"jsort: {rec.file}:{rec.lineno}: " + (f"above every anchor (the highest is {_number(high, 2)})"
+                      if beyond > 0 else f"below every anchor (the lowest is {_number(low, 2)})")
+                      + f"; its score of {_number(score, 2)} is best read as a bound toward the scale", file=err)
         try:
-            while not halt.is_set():
-                get = asyncio.ensure_future(queue.get())
-                await asyncio.wait({get, halted}, return_when=asyncio.FIRST_COMPLETED)
-                if not get.done():
-                    get.cancel()
-                    break
-                item = get.result()
-                if item is None:
-                    break
-                if isinstance(item, str):
-                    complain(item)
-                    continue
-                if isinstance(item, list):
-                    if clash := writer.clash(item):
-                        s["fatal"] = f"the file already has a column named {clash}; choose another prefix with --name"
-                        break
-                    try:
-                        writer.start(item)
-                        out.flush()
-                    except BrokenPipeError:     # the header is output too: a reader that has gone ends the run quietly
-                        s["broken_pipe"] = True
-                        break
-                    continue
-                if args.jsonl and isinstance(item.data, dict) and (clash := writer.clash(item.data)):
-                    s["fatal"] = f"the records already have a field named {clash}; choose another prefix with --name"
-                    break
-                s["ragged"] += bool(args.csv and item.data.get(None))
-                slot = asyncio.ensure_future(sem.acquire())
-                await asyncio.wait({slot, halted}, return_when=asyncio.FIRST_COMPLETED)
-                if halt.is_set():
-                    slot.cancel()
-                    await asyncio.gather(slot, return_exceptions=True)
-                    break
-                task = asyncio.create_task(judge(seq, item))
-                seq += 1
-                tasks.add(task)
-                task.add_done_callback(completed)
+            writer.text(rec, None, score, se, n, beyond, partial)
+            out.flush()
+        except BrokenPipeError:
+            return True
+        return False
 
-            stop.set()
-            if feeding["put"] is not None:
-                feeding["put"].cancel()
-            # At the budget the texts in hand are placed on what they have and printed; nothing new is asked.
-            # A refusal or a closed pipe ends the printing, so what is still in the air is dropped.
-            pending = list(tasks)
-            if s["fatal"] or s["broken_pipe"]:
-                for t in pending:
-                    t.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+    async def judge(item):
+        if isinstance(item, (str, list)):   # a problem, or a CSV header, reported in its place
+            return item
+        s["truncated"] += len(item.text) > args.max_chars
+        shown = item.text[:args.max_chars]
+        if shown in known:              # an anchor's score is in the file
+            return known[shown].score, known[shown].se, known[shown].comparisons, 0, False
+        if not shown.strip():
+            return math.nan, math.nan, 0, 0, False
+        if s["placer"] is None:         # the first text worth asking about is what needs a key
+            s["jev"] = s["jev"] or client()
+            s["placer"] = Placer(scale, s["jev"], per_item=args.per_item, seed=args.seed,
+                                 max_chars=args.max_chars, concurrency=args.concurrency, any_model=args.any_model)
+        placed = await s["placer"].place(item.text)
+        if s["placer"].fatal:   # a bad key or another model: stop at once, ahead of the texts waiting to print
+            raise JevFatal(s["placer"].fatal)
+        return placed
+
+    async def go() -> None:
+        texts = ordered_map(lambda stop: read_records(files, args, stop), judge, concurrency=args.concurrency,
+                            ordered=not args.unordered, urgent=(JevFatal, ScaleError))
+        try:
+            async with texts as results:
+                async for outcome in results:
+                    item, value, error = outcome.item, outcome.value, outcome.error
+                    if item is None:
+                        complain(f"input reader: {type(error).__name__}: {error}")
+                        break
+                    if isinstance(error, (JevFatal, ScaleError)):
+                        s["fatal"] = s["fatal"] or str(error)
+                        break
+                    if error is not None:
+                        complain(f"{item.file}:{item.lineno}: {type(error).__name__}: {error}")
+                        continue
+                    if isinstance(value, str):
+                        complain(value)
+                        continue
+                    if isinstance(value, list):
+                        if clash := writer.clash(value):
+                            s["fatal"] = f"the file already has a column named {clash}; choose another prefix with --name"
+                            break
+                        try:
+                            writer.start(value)
+                            out.flush()
+                        except BrokenPipeError:   # the header is output too: a reader that has gone ends the run
+                            break
+                        continue
+                    if args.jsonl and isinstance(item.data, dict) and (clash := writer.clash(item.data)):
+                        s["fatal"] = f"the records already have a field named {clash}; choose another prefix with --name"
+                        break
+                    s["ragged"] += bool(args.csv and item.data.get(None))
+                    if emit(item, *value):
+                        break
+                    placer = s["placer"]
+                    if placer is not None and placer.fatal:
+                        s["fatal"] = s["fatal"] or placer.fatal
+                        break
+                    if placer is not None and placer.over_budget:
+                        # At the budget the texts in hand are placed on what they have and printed; nothing new is read.
+                        texts.finish()
         finally:
-            stop.set()
-            halted.cancel()
-            await asyncio.gather(halted, return_exceptions=True)
             if s["jev"] is not None:
                 await s["jev"].close()
 
@@ -643,10 +580,12 @@ def stream(args, scale: Scale, files: list[str], client, show_stats: bool, out, 
         print(f"jsort: and {len(errors) - MAX_ERRORS_SHOWN:,} more failed comparisons", file=err)
     closing_notes(args, scale, truncated=s["truncated"], ragged=s["ragged"], over_budget=bool(placer and placer.over_budget),
                   asked=placer.asked if placer else 0, unscored=s["unscored"], beyond=(s["above"], s["below"]),
-                  unverified=placer.unverified if placer else 0, partial=s["partial"], err=err)
+                  budget=budget, unverified=placer.unverified if placer else 0, partial=s["partial"], err=err)
+    if s["jev"] is not None:
+        record(run, s["jev"], args, scale.description, err)
     if show_stats and placer is not None:
         print(f"jsort: {s['seen']:,} texts placed against {len(scale.anchors):,} anchors, {placer.asked:,} comparisons; "
-              f"{s['jev'].meter.summary()}; {time.perf_counter() - t0:.1f}s", file=err)
+              f"{stats_line(s['jev'], time.perf_counter() - t0)}", file=err)
     return 2 if s["problems"] or s["fatal"] or errors or (placer and placer.over_budget) else 0
 
 

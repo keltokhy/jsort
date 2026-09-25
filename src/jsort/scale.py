@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from jevkit_runtime import Noul, from_body
+
 SCHEMA_VERSION = 1
 # A default -k 10 placement spends six comparisons near its running estimate, where an anchor within a
 # logit still carries four-fifths of the most a comparison can. Thirty anchors put about six within a
@@ -30,9 +32,9 @@ DEFAULT_ANCHORS = 30
 UNITS = (None, "line", "para", "whole", "field")
 
 
-def question(description: str) -> dict:
-    """The question every comparison asks. A schema-1 scale holds exactly this for its description."""
-    return {"type": "noul", "instructions": f'Text A ranks higher than text B on this criterion: "{description}"'}
+def question(description: str) -> Noul:
+    """The question every comparison asks. A schema-1 scale holds exactly its body for its description."""
+    return Noul(f'Text A ranks higher than text B on this criterion: "{description}"')
 
 
 class ScaleError(ValueError):
@@ -58,6 +60,11 @@ class Scale:
     anchors: tuple[Anchor, ...]   # highest first
     created: str | None = None
     jsort_version: str | None = None
+
+    @property
+    def asked(self) -> Noul:
+        """The saved question, ready to ask again verbatim."""
+        return from_body(self.question)
 
     @property
     def gamma(self) -> float:
@@ -131,9 +138,9 @@ class Scale:
             raise ScaleError("the scale has no description")
         # Placement sends the saved question, so it has to be the one this description stands for and nothing else:
         # a file whose question was edited would measure something its description does not say.
-        if data.get("question") != question(description):
+        if data.get("question") != question(description).body():
             raise ScaleError("the scale's question is not the one jsort asks for its description, "
-                             f"{question(description)['instructions']!r}; the file has been edited")
+                             f"{question(description).text!r}; the file has been edited")
         model, inputs, fitted = data.get("model"), data.get("input"), data.get("fit")
         if not isinstance(model, dict) or not all(isinstance(model.get(k), str) and model[k]
                                                   for k in ("api", "endpoint", "requested")):

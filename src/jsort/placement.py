@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import math
 import os
 from dataclasses import dataclass, field
@@ -23,7 +22,8 @@ from numbers import Integral
 
 import numpy as np
 
-from jevkit_runtime import Answers, DEFAULT_PRICE_PER_MTOK as PRICE_PER_MTOK, Client, JevError, JevFatal
+from jevkit_runtime import Answers, Budget, Client, JevBudgetExceeded, JevError, JevFatal, estimate_tokens, request_body
+from jevkit_runtime.cli import run_sync
 from .engine import Ranking
 from .model import place as locate
 from .scale import Scale, ScaleError
@@ -42,129 +42,96 @@ class Placement(Ranking):
     model_refused: bool = False    # none of a batch's scores may print after a model mismatch
 
 
-def _tokens(model: str, state: dict, question: dict) -> int:
-    """What a request will bill, near enough to reserve for it: jgrep's estimate, a token for every four bytes
-    of the request and 270 of overhead."""
-    payload = json.dumps({"model": model, "state": state, "questions": {"q": question}}, ensure_ascii=False)
-    return math.ceil(len(payload.encode("utf-8")) / 4) + 270
+def _tokens(model: str, state: dict, question) -> int:
+    """What a comparison will bill, near enough to set money aside for: the runtime's estimate."""
+    return estimate_tokens(request_body(model, state, {"q": question}))
 
 
-class _Purse:
-    """The budget, shared by every text being placed at once.
+class _Admission:
+    """Which texts are placed when the money runs out: whole texts, in input order.
 
-    Nothing is reserved from what earlier replies happened to cost: a short probe says nothing about the long
-    documents behind it. A request is priced before it goes, from its own size, at the dearest rate per
-    estimated token seen so far, and until a charge has been seen at MARGIN times the list price.
+    A text is admitted only with a share of the budget covering every comparison it may ask for, and texts
+    are admitted in the order they came, each joining the budget's line before the next. So when the money
+    runs out some texts are placed in full and the rest not at all, and a score does not depend on what else
+    was in the input. Only a rise in price can cut a text short once it has begun, and such a text is
+    reported as partial.
 
-    A text is admitted only when the budget covers every comparison it may ask for, and texts are admitted in
-    input order. So when the money runs out some texts are placed in full and the rest not at all, and a score
-    does not depend on what else was in the input. Only a rise in price can cut a text short once it has begun,
-    and such a text is reported as partial.
-
-    While nothing is known the first request goes alone, and the number of texts in hand then doubles with each
-    text that finishes without the rate rising, from one up to -j; a rise sends it back to one. What can still
-    take spending past the limit is the calls in the air at the moment a price rises.
+    While nothing is known the first text goes alone, and the number of texts in hand then doubles with each
+    text that finishes without the price rising, from one up to -j; a rise sends it back to one. Without a
+    limit there is nothing to protect, and -j texts go at once.
     """
 
-    MARGIN = 1.5     # on the list price, while no charge has been seen
-    RISE = 1.25      # a rate this much above the one reserved at is a rise, not jitter in the estimate
-
-    def __init__(self, budget: float, width: int):
-        self.budget, self.width, self.spent = budget, width, 0.0
-        self.rate = 0.0                    # dollars per estimated token: the dearest seen
-        self.held = self.flying = 0        # tokens reserved by the texts in hand, and how many texts that is
-        self.flight = 0                    # tokens of the requests in the air
-        self.window, self.rises = 1, 0
-        self.tickets = self.serving = 0    # texts are admitted in the order they asked
+    def __init__(self, budget: Budget, width: int):
+        self.budget, self.width = budget, width
+        self.window = width if budget.unlimited else 1
+        self.flying = self.tickets = self.serving = 0
         self.gone: set[int] = set()
         self.over = False
-        self.changed = asyncio.Condition()
-        self.probe = asyncio.Lock()
+        self.room = asyncio.Condition()
 
-    def price(self, tokens: int) -> float:
-        return tokens * (self.rate or PRICE_PER_MTOK / 1e6 * self.MARGIN)
-
-    def remaining(self) -> float:
-        # Roundoff at the limit must not buy an extra request.
-        return 0.0 if math.isclose(self.spent, self.budget, rel_tol=1e-12) else self.budget - self.spent
-
-    def charge(self, cost: float, tokens: int) -> None:
-        self.spent += cost
-        if cost / tokens > self.RISE * (self.rate or PRICE_PER_MTOK / 1e6 * self.MARGIN):
-            self.rises += 1
-            self.window = 1
-        self.rate = max(self.rate, cost / tokens)
-
-    async def admit(self, tokens: int, stopped) -> int | None:
-        """Wait in line for room for a whole text. Returns the state of `rises` on admission, or None: the run has
-        stopped, or the budget cannot cover this text and nothing in hand will give any of it back."""
-        if not self.budget:
-            return None if stopped() else 0
+    async def admit(self, price, stopped) -> tuple[Budget, int] | None:
+        """Wait in line for a whole text's share: the share and the rises seen at admission, or None when the
+        run has stopped or the budget cannot cover the text even once everything in hand has come back.
+        `price()` is asked at admission, so a charge seen while the text waited sets what it reserves."""
         ticket, self.tickets = self.tickets, self.tickets + 1
-        async with self.changed:
+        async with self.room:
             try:
-                while not (stopped() or self.over):
-                    if ticket == self.serving:
-                        if self.flying < self.window and self.price(self.held + tokens) <= self.remaining():
-                            self.held, self.flying = self.held + tokens, self.flying + 1
-                            return self.rises
-                        if not self.flying:
-                            self.over = True
-                            break
-                    await self.changed.wait()
-                return None
+                await self.room.wait_for(
+                    lambda: stopped() or self.over or (ticket == self.serving and self.flying < self.window))
+                if stopped() or self.over:
+                    return None
+                self.flying += 1
             finally:       # admitted, refused or cancelled, the text leaves the line and the next one is served
                 self.gone.add(ticket)
                 while self.serving in self.gone:
                     self.gone.discard(self.serving)
                     self.serving += 1
-                self.changed.notify_all()
-
-    def take(self, tokens: int) -> bool:
-        """Whether a request may go, counting what is already in the air at today's rate. Its text's admission
-        covered it unless the price has risen since; then the request is not sent and the text is cut short."""
-        if self.budget:
-            if self.price(self.flight + tokens) > self.remaining():
+                self.room.notify_all()
+        try:
+            # A cache-only run (a zero budget) still places whatever the cache holds, text by text.
+            share = await self.budget.allot(price() if self.budget.limit > 0 else 0.0)
+        except BaseException as refused:
+            if isinstance(refused, JevBudgetExceeded):
                 self.over = True
-                return False
-            self.flight += tokens
-        return True
+            async with self.room:
+                self.flying -= 1
+                self.room.notify_all()
+            if isinstance(refused, JevBudgetExceeded):
+                return None
+            raise
+        return share, self.budget.rises
 
-    def give(self, tokens: int) -> None:
-        if self.budget:
-            self.flight -= tokens
-
-    async def leave(self, tokens: int, admitted_at: int) -> None:
-        """A text is done with what is left of its reservation."""
-        if self.budget:
-            async with self.changed:
-                self.held, self.flying = self.held - tokens, self.flying - 1
-                if self.rises == admitted_at:
-                    self.window = min(2 * self.window, self.width)
-                self.changed.notify_all()
+    async def leave(self, share: Budget, admitted_at: int) -> None:
+        """A text is done with what is left of its share."""
+        share.close()
+        async with self.room:
+            self.flying -= 1
+            if not self.budget.unlimited:
+                self.window = min(2 * self.window, self.width) if self.budget.rises == admitted_at else 1
+            self.room.notify_all()
 
 
 class Placer:
     """One run's shared state: the scale, the client, the budget and what went wrong. `place` takes one text."""
 
-    def __init__(self, scale: Scale, jev: Client, *, per_item: int = 10, seed: int = 0, budget: float | None = None,
-                 max_chars: int | None = None, concurrency: int = 32, any_model: bool = False):
+    def __init__(self, scale: Scale, jev: Client, *, per_item: int = 10, seed: int = 0,
+                 max_chars: int | None = None, concurrency: int = 32, any_model: bool = False,
+                 budget: Budget | None = None):
         max_chars = scale.max_chars if max_chars is None else max_chars
         for name, value, minimum in (("per_item", per_item, 2), ("concurrency", concurrency, 1),
                                      ("max_chars", max_chars, 1), ("seed", seed, 0)):
             if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
                 raise ValueError(f"{name} must be an integer of at least {minimum}")
-        if budget is None:
-            budget = float(os.environ.get("JSORT_BUDGET") or 1.0)
-        if not math.isfinite(budget) or budget < 0:
-            raise ValueError("budget must be finite and nonnegative")
         if not any_model:
             scale.check_model(jev.backend.name, jev.url, jev.model)
         self.scale, self.jev, self.any_model = scale, jev, any_model
         self.per_item, self.seed, self.max_chars = int(per_item), int(seed), int(max_chars)
         self.scores = np.array([a.score for a in scale.anchors])     # highest first, as the scale keeps them
         self.known = {a.text: a for a in scale.anchors}
-        self.purse, self.sem = _Purse(budget, concurrency), asyncio.Semaphore(concurrency)
+        self.asked_question = scale.asked
+        # This run's budget, else the client's; a stand-in judge may have none, which is no limit.
+        self.budget = budget or getattr(jev, "budget", None) or Budget()
+        self.admission, self.sem = _Admission(self.budget, concurrency), asyncio.Semaphore(concurrency)
         self.model = getattr(jev, "model", None) or ""      # only to size a request; a stand-in judge may have none
         self.longest = max((a.text for a in scale.anchors), key=len)
         self.planned = min(self.per_item, 2 * len(scale.anchors))     # an anchor is met twice at most
@@ -172,46 +139,47 @@ class Placer:
         self.errors: list[str] = []
         self.fatal: str | None = None
         self.probed = self.model_refused = False
+        self.probe = asyncio.Lock()
         self.placed: dict[bytes, asyncio.Future] = {}   # one result per shown text, even without the answer cache
 
     @property
     def over_budget(self) -> bool:
-        return self.purse.over
+        return self.admission.over
 
     @property
     def halted(self) -> bool:
-        return bool(self.fatal) or self.purse.over
+        return bool(self.fatal) or self.admission.over
 
-    async def _ask(self, state: dict, tokens: int) -> Answers | None:
-        """One request, if the budget has room for it beside those already in the air. None when it does not."""
-        if not self.purse.take(tokens):
-            return None
+    async def _ask(self, state: dict, share: Budget) -> Answers | None:
+        """One comparison, drawn on the text's share. None when the share has no room for it: prices rose
+        after the text was admitted, or a cache-only run meets a comparison it has not seen."""
         try:
-            return await self.jev.ask(state, {"q": self.scale.question},
-                                      on_cost=lambda cost: self.purse.charge(cost, tokens))
-        finally:
-            self.purse.give(tokens)
+            return await self.jev.ask(state, {"q": self.asked_question}, budget=share)
+        except JevBudgetExceeded:
+            if self.budget.limit > 0:
+                self.admission.over = True
+            return None
 
     def _state(self, shown: str, anchor: str, leads: bool) -> dict:
         return {"A": shown, "B": anchor} if leads else {"A": anchor, "B": shown}
 
-    async def _compare(self, state: dict, tokens: int) -> float | None:
+    async def _compare(self, state: dict, share: Budget) -> float | None:
         async with self.sem:
             if self.fatal:
                 return None
             if not self.probed:
-                async with self.purse.probe:
+                async with self.probe:
                     if self.fatal:
                         return None
                     if not self.probed:
-                        # Check identity before releasing the lock. A cached answer cannot confirm today's alias,
-                        # and a zero-cost reply can; the first live request goes alone even with --budget 0.
-                        return await self._answer(state, tokens)
-            return await self._answer(state, tokens)
+                        # Check identity before releasing the lock. A cached answer cannot confirm today's model,
+                        # and a live reply can; the first live request goes alone.
+                        return await self._answer(state, share)
+            return await self._answer(state, share)
 
-    async def _answer(self, state: dict, tokens: int) -> float | None:
+    async def _answer(self, state: dict, share: Budget) -> float | None:
         try:
-            answer = await self._ask(state, tokens)
+            answer = await self._ask(state, share)
             if answer is None:
                 return None
             origin = answer.origins["q"]
@@ -222,7 +190,7 @@ class Placer:
                 self.unverified += not verified
             if origin.get("source", "api") == "api" and (verified or self.any_model):
                 self.probed = True
-            return float(answer["q"]["noul"])
+            return self.asked_question.value(answer["q"])
         except JevError as e:
             self.errors.append(str(e))
         except (JevFatal, ScaleError) as e:
@@ -258,21 +226,24 @@ class Placer:
         result = self.placed[digest] = asyncio.get_running_loop().create_future()
         try:
             # Room for every comparison the text may ask for, each priced as if it met the longest anchor.
-            reserve = self.planned * _tokens(self.model, self._state(shown, self.longest, True), self.scale.question)
-            admitted_at = await self.purse.admit(reserve, lambda: self.halted)
-            if admitted_at is None:
+            tokens = self.planned * _tokens(self.model, self._state(shown, self.longest, True), self.asked_question)
+            backend = getattr(self.jev, "backend", None)
+            price = (lambda: self.budget.price(backend, tokens)) if backend is not None else (lambda: 0.0)
+            admitted = await self.admission.admit(price, lambda: self.halted)
+            if admitted is None:
                 result.set_result(nowhere)
             else:
+                share, admitted_at = admitted
                 try:
-                    result.set_result(await self._place(shown))
+                    result.set_result(await self._place(shown, share))
                 finally:
-                    await self.purse.leave(reserve, admitted_at)
+                    await self.admission.leave(share, admitted_at)
             return result.result()
         finally:
             if not result.done():
                 result.cancel()       # wake any duplicate waiting on a cancelled placement
 
-    async def _place(self, shown: str) -> tuple[float, float, int, int, bool]:
+    async def _place(self, shown: str, share: Budget) -> tuple[float, float, int, int, bool]:
         digest = hashlib.sha256(shown.encode("utf-8", "surrogatepass")).digest()
         rng = np.random.default_rng([self.seed, int.from_bytes(digest[:8], "big")])
         leads = bool(rng.integers(2))      # positions alternate from a random start, so the lean has both to work with
@@ -291,10 +262,10 @@ class Placer:
                 leads = not leads
                 met.setdefault(a, []).append(position)
                 state = self._state(shown, self.scale.anchors[a].text, position)
-                asks.append((a, position, state, _tokens(self.model, state, self.scale.question)))
+                asks.append((a, position, state))
             self.rounds = max(self.rounds, r + 1)
-            answers = [] if self.fatal else await asyncio.gather(*(self._compare(ask[2], ask[3]) for ask in asks))
-            for (a, position, _, _), y in zip(asks, answers):
+            answers = [] if self.fatal else await asyncio.gather(*(self._compare(ask[2], share) for ask in asks))
+            for (a, position, _), y in zip(asks, answers):
                 if y is not None:
                     against.append(self.scores[a])
                     led.append(position)
@@ -302,7 +273,7 @@ class Placer:
                     self.asked += 1
             if ys:
                 estimate, se = locate(against, led, ys, self.scale.gamma, start=estimate, ridge=self.scale.ridge)
-            if self.fatal or (self.purse.over and len(answers) > sum(y is not None for y in answers)):
+            if self.fatal or (self.admission.over and len(answers) > sum(y is not None for y in answers)):
                 planned += sum(sizes[r + 1:])          # cut short: the rounds that will not be asked were planned too
                 break
         if not ys:
@@ -320,8 +291,8 @@ async def aplace(texts: list[str], scale: Scale | str | os.PathLike, jev: Client
     per_item is the comparisons each text gets, all of them with anchors. Every text gets them all: there is
     no stopping once a standard error looks small, because a rule that stops on the reported error selects for
     small estimates of it. max_chars defaults to the scale's. A scale that cannot name one model, or that was
-    built with another API, endpoint or model, raises ScaleError unless any_model is set. budget is the
-    dollars the run may spend: a text is placed in full or not at all, and `partial` marks one cut short.
+    built with another API, endpoint or model, raises ScaleError unless any_model is set. Spending is the
+    client's budget: a text is placed in full or not at all, and `partial` marks one cut short.
     Blank texts get no score; an anchor's own text gets the score the scale gave it.
     Repeated shown texts share one result within the run. A new text's se is nan below three successful
     comparisons or more than two logits past an end anchor, where it would suggest misleading precision.
@@ -359,37 +330,37 @@ def collect(results: list[tuple[float, float, int, int, bool]], scale: Scale, pl
 
 
 def place(texts: list[str], scale: Scale | str | os.PathLike, *, api: str | None = None, model: str | None = None,
-          cache: bool = True, timeout: float = 15.0, transport=None, **options) -> Placement:
+          cache: bool = True, timeout: float = 15.0, budget: float | Budget | None = None, transport=None,
+          **options) -> Placement:
     """aplace from ordinary code, as rank is to arank. The API and model default to the ones the scale was built with.
 
         scale = jsort.rank(statements, "more hawkish about inflation").scale()
         scale.save("hawkish.json")
         p = jsort.place(new_statements, "hawkish.json")
         p.score, p.se, p.beyond
-    """
-    import concurrent.futures
 
+    `budget` is as rank's: dollars, math.inf for no limit, 0 for the cache only, or a Budget; by default
+    $JEV_BUDGET, else 1.00.
+    """
     from jevkit_runtime import AnswerStore
+    from .engine import DEFAULT_BUDGET
 
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and greater than 0")
     if not isinstance(scale, Scale):
         scale = Scale.load(scale)
+    budget = budget if isinstance(budget, Budget) else (
+        Budget.from_settings(DEFAULT_BUDGET) if budget is None else Budget(budget))
 
     async def go() -> Placement:
         jev = Client(client_for(scale, api, model), timeout=timeout, concurrency=options.get("concurrency", 32),
-                  store=AnswerStore() if cache else None, transport=transport)
+                     store=AnswerStore() if cache else None, budget=budget, transport=transport)
         try:
             return await aplace(texts, scale, jev, **options)
         finally:
             await jev.close()
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(go())
-    with concurrent.futures.ThreadPoolExecutor(1) as pool:   # a notebook already has a loop running
-        return pool.submit(asyncio.run, go()).result()
+    return run_sync(go())
 
 
 def client_for(scale: Scale, api: str | None, model: str | None):

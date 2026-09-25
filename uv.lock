@@ -148,7 +148,7 @@ dev = [{ name = "pytest", specifier = ">=8" }]
 
 [[package]]
 name = "jevkit-runtime"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "../jevkit-core" }
 dependencies = [
     { name = "httpx" },

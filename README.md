@@ -61,7 +61,7 @@ uv tool install jev-sort        # the command it installs is jsort
 jsort finds a key the way [jgrep](https://github.com/keltokhy/jgrep) does: `TYPESAFE_API_KEY`,
 `OPENROUTER_API_KEY`, or a System One gateway (`JEV_GATEWAY_URL` and `JEV_GATEWAY_API_KEY`), from the
 environment or from `~/.config/jev/typesafe.key`, `openrouter.key` or `gateway.key`. Force a choice
-with `--api` or `JEV_API`. All the JevKit tools share one cache file, `~/.cache/jev/answers.sqlite`,
+with `--api` or `JEV_API`. All the JevKit tools share one cache file, `~/.cache/jev/answers.v3.sqlite`,
 and key every answer by provider, endpoint, model, text and question, so switching gateways cannot
 reuse another gateway's answers. Each answer is stored with the model that gave it, which is how a
 saved scale can say who answered.
@@ -116,7 +116,7 @@ jsort --scale hawkish.json -o september.txt                  # place new texts o
 | `--scale FILE` | Place the input on the scale saved in FILE. The description comes from the file. Each text is compared with the scale's anchors only. |
 | `--unordered` | With `--scale`, print each text as soon as it is placed, not in input order. |
 | `--any-model` | With `--scale`, place even though the API, endpoint or model is not the one the scale was built with, or the scale cannot name one. With `--save-scale`, save even though the answers behind the fit do not all name one model. |
-| `--budget DOLLARS` | Stop asking once this much is spent and sort on what is known. Default 1.00, or `$JSORT_BUDGET`; 0 for no limit. |
+| `--budget DOLLARS` | Send no comparison that would take spending past this, and sort on what is known. Default 1.00, or `$JEV_BUDGET`; `none` for no limit, 0 to answer only from the cache. |
 | `--max-chars N` | Show Jev only the first N characters of a text. Default 8000; with `--scale`, the scale's. |
 | `-j N`, `--timeout`, `--no-cache`, `--api`, `--model`, `--stats` | As in jgrep. |
 
@@ -272,7 +272,9 @@ It then checks every answer it uses against the model the scale names, the cache
 the cache keys on the ID that was asked for and not on who replied. If the scale was built through
 an alias such as `jev-latest` and that alias now reaches a newer model, the first uncached answer
 shows it and the run stops. That request goes alone until its answering model is confirmed, even
-with `--budget 0`; cached answers cannot confirm where the alias points today. A model refusal
+with `--budget none`; cached answers cannot confirm where the alias points today. The model is pinned
+to a Jev release by default (`jev-1.13.0`, `typesafe/jev-1.13` on OpenRouter), so this arises for
+scales built through an alias. A model refusal
 exits with code 2 and prints no batch scores; a stream stops printing when it detects the refusal.
 Pinning the model that answered, by the ID the message gives, is accepted. An
 answer that names no model cannot be checked, and stderr says how many there were. `--any-model`
@@ -312,10 +314,12 @@ r.reliability, r.lean, r.asked
 ```
 
 `r.score`, `r.se` and `r.comparisons` are arrays aligned with the input. The command's seat belt
-applies here too: spending stops at `budget=` dollars, by default `$JSORT_BUDGET` or 1.00, and
-`r.over_budget` says whether it was reached. It works inside a notebook. `jsort.arank` is the same
-thing as a coroutine, for a client you already hold. Each concurrent ranking has its own budget;
-a shared request is charged to the ranking that starts it, and cached answers are free.
+applies here too: spending stops at `budget=` dollars (`math.inf` for no limit, 0 for the cache
+only), by default `$JEV_BUDGET` or 1.00, and `r.over_budget` says whether it was reached. It works
+inside a notebook. `jsort.arank` is the same thing as a coroutine, for a client you already hold; it
+spends from the client's budget, or from `budget=jevkit_runtime.Budget(...)` for that run alone, so
+concurrent rankings can each have their own. A shared request is charged to the ranking that starts
+it, and cached answers are free.
 
 ```python
 scale = r.scale(anchors=30)                  # the run's scale, as --save-scale writes it
@@ -359,13 +363,14 @@ slowest call, so a small sort takes five to ten seconds. A large one manages abo
 second through OpenRouter.
 
 jsort stops asking at `--budget`, one dollar by default, and sorts on what it has. Nothing is lost:
-every answer is cached in `~/.cache/jev/answers.sqlite`, and the choice of pairs is seeded, so a rerun
+every answer is cached in `~/.cache/jev/answers.v3.sqlite`, and the choice of pairs is seeded, so a rerun
 with a higher budget, or a higher `-k`, starts by replaying the same questions from the cache and
 only pays for the new ones.
 
-With a budget, jsort starts with one request and sizes later concurrent batches using the largest
-charge observed so far. Costs are reported after completion, so a final request or an unexpected
-increase in request cost can still take spending above the threshold. `--budget 0` disables this limit.
+Under a limit the runtime sends the first comparison alone to learn the price, then sets aside each
+comparison's estimated price before it goes out, at the dearest rate charged so far, so comparisons in
+flight together cannot pass the limit; only a price that rises while they are in the air can.
+`--budget none` removes the limit, and `--budget 0` answers only from the cache.
 
 The budget covers a `--scale` run too, more carefully, because texts arrive one by one and a short
 first text says nothing about the price of a long one behind it. Each request is priced before it is
@@ -380,7 +385,7 @@ estimate a little of the budget is usually left unspent. It is still not a hard 
 only when a reply arrives, so the calls in the air at the moment a price rises can take spending
 past the limit, by at most `-j` requests at the new price. A stream that reaches the budget stops
 reading, finishes the texts it has begun, and exits with status 2. For a long-lived `tail -f`, set
-your own default once with `export JSORT_BUDGET=20`, or `0` for no limit.
+your own default once with `export JEV_BUDGET=20`, or `none` for no limit; it applies to every JevKit tool.
 
 ## How well does it work
 
