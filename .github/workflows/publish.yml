@@ -8,6 +8,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays, so a dependency release shows up even in a week with no pushes
 
 permissions:
   contents: read
@@ -20,9 +22,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The lockfile pins what the first two legs install. The last leg ignores it and installs the newest
+    # release of every dependency on the newest Python, as a fresh `pip install` would, so an upstream
+    # release that breaks users (pandas 3 broke jlink 0.5.0) fails here instead of in the wild.
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.13"]
+        include:
+          - python: "3.14"
+            deps: latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,7 +45,7 @@ jobs:
         with:
           version: "0.12.9"
           python-version: ${{ matrix.python }}
-      - run: uv sync --locked
+      - run: uv sync ${{ matrix.deps == 'latest' && '--upgrade' || '--locked' }}
       - run: uv run pytest -q
       - run: uv build --no-sources
       - run: uvx --from twine==7.0.0 twine check --strict dist/*
