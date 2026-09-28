@@ -175,7 +175,7 @@ def rank(texts: list[str], description: str, *, api: str | None = None, model: s
     defaults as the command's does, to $JEV_BUDGET, else 1.00. `r.over_budget` says whether it was reached.
     Other options are arank's.
     """
-    from jevkit_runtime import AnswerStore, resolve
+    from jevkit_runtime import resolve
     from .core import PROVIDERS
 
     if not math.isfinite(timeout) or timeout <= 0:
@@ -186,7 +186,7 @@ def rank(texts: list[str], description: str, *, api: str | None = None, model: s
     async def go() -> Ranking:
         backend = resolve(PROVIDERS, api, model=model)
         jev = Client(backend, timeout=timeout, concurrency=options.get("concurrency", 32),
-                     store=AnswerStore() if cache else None, budget=budget, transport=transport)
+                     store=cache, budget=budget, transport=transport)
         try:
             return await arank(texts, description, jev, **options)
         finally:

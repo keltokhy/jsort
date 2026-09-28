@@ -22,7 +22,7 @@ import os
 import sys
 import time
 
-from jevkit_runtime import AnswerStore, Budget, Client, JevFatal, Run
+from jevkit_runtime import Budget, Client, JevFatal, Run
 from jevkit_runtime.cli import (
     Parser,
     UsageError,
@@ -299,7 +299,7 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
     def client() -> Client:
         """The scale's API and model unless others were named. Made inside the running loop, where it is closed."""
         return Client(client_for(scale, args.api, args.model), timeout=args.timeout, concurrency=args.concurrency,
-                      store=None if args.no_cache else AnswerStore(), budget=budget, transport=transport)
+                      store=not args.no_cache, budget=budget, transport=transport)
 
     if scale and (args.keep_order or args.unordered):
         return stream(args, scale, files, client, budget, run, show_stats, out, err)

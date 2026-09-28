@@ -342,7 +342,6 @@ def place(texts: list[str], scale: Scale | str | os.PathLike, *, api: str | None
     `budget` is as rank's: dollars, math.inf for no limit, 0 for the cache only, or a Budget; by default
     $JEV_BUDGET, else 1.00.
     """
-    from jevkit_runtime import AnswerStore
     from .engine import DEFAULT_BUDGET
 
     if not math.isfinite(timeout) or timeout <= 0:
@@ -354,7 +353,7 @@ def place(texts: list[str], scale: Scale | str | os.PathLike, *, api: str | None
 
     async def go() -> Placement:
         jev = Client(client_for(scale, api, model), timeout=timeout, concurrency=options.get("concurrency", 32),
-                     store=AnswerStore() if cache else None, budget=budget, transport=transport)
+                     store=cache, budget=budget, transport=transport)
         try:
             return await aplace(texts, scale, jev, **options)
         finally:
