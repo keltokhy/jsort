@@ -20,18 +20,20 @@ defaults:
 
 jobs:
   test:
+    name: test (${{ matrix.python }}, ${{ matrix.deps }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # The lockfile pins what the first two legs install. The last leg ignores it and installs the newest
-    # release of every dependency on the newest Python, as a fresh `pip install` would, so an upstream
-    # release that breaks users (pandas 3 broke jlink 0.5.0) fails here instead of in the wild.
+    # locked installs what uv.lock pins. lowest and latest ignore the lockfile and install the oldest and
+    # newest versions pyproject.toml allows, as `pip install` may, so a dependency range that has stopped
+    # being true fails here instead of for users (pandas 3 broke jlink 0.5.0).
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.13"]
         include:
-          - python: "3.14"
-            deps: latest
+          - {python: "3.10", deps: locked, sync: --locked}
+          - {python: "3.13", deps: locked, sync: --locked}
+          - {python: "3.10", deps: lowest, sync: --upgrade --resolution lowest-direct}
+          - {python: "3.14", deps: latest, sync: --upgrade}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,7 +47,7 @@ jobs:
         with:
           version: "0.12.9"
           python-version: ${{ matrix.python }}
-      - run: uv sync ${{ matrix.deps == 'latest' && '--upgrade' || '--locked' }}
+      - run: uv sync ${{ matrix.sync }}
       - run: uv run pytest -q
       - run: uv build --no-sources
       - run: uvx --from twine==7.0.0 twine check --strict dist/*
