@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1
 
 - Needs jevkit-runtime 0.4.2, whose client opens and closes the answer store itself: each run left a
   SQLite connection for the garbage collector.
