@@ -32,8 +32,10 @@ DEFAULT_ANCHORS = 30
 UNITS = (None, "line", "para", "whole", "field")
 
 
-def question(description: str) -> Noul:
+def question(description: str, images: bool = False) -> Noul:
     """The question every comparison asks. A schema-1 scale holds exactly its body for its description."""
+    if images:
+        return Noul(f'The picture in A ranks higher than the picture in B on this criterion: "{description}"')
     return Noul(f'Text A ranks higher than text B on this criterion: "{description}"')
 
 

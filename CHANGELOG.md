@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Images, experimental: PNG and JPEG files sort by what their pictures show, with a question about
+  pictures. A run sorts images or texts, not both; `--scale` and `--save-scale` refuse images for now.
+  Needs `jevkit-runtime` 0.4.3 and the new `images` extra (`jev-sort[images]`).
+
 ## 0.5.1
 
 - Needs jevkit-runtime 0.4.2, whose client opens and closes the answer store itself: each run left a

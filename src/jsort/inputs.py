@@ -9,9 +9,13 @@ import json
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+
+from jevkit_runtime import Image, JevError
 
 STDIN = "(standard input)"
 csv.field_size_limit(min(sys.maxsize, 2 ** 31 - 1))   # the default of 131,072 characters is smaller than --max-chars allows
+IMAGE_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")   # PNG and JPEG, the images Jev reads
 
 
 @dataclass
@@ -21,6 +25,16 @@ class Record:
     file: str
     lineno: int
     data: dict | None = None     # the parsed record, for --csv and --jsonl
+    image: bool = False          # a picture: text is its Image, a reference the runtime sends as the file
+
+
+def is_image(name: str) -> bool:
+    """A PNG or JPEG file, by its first bytes rather than its name."""
+    try:
+        with Path(name).open("rb") as f:
+            return f.read(8).startswith(IMAGE_SIGNATURES)
+    except OSError:
+        return False
 
 
 class InputError(Exception):
@@ -78,6 +92,12 @@ def records(files: list[str], args, stop=None):
         if halted():
             return
         label = STDIN if name == "-" else name
+        if name != "-" and not (args.csv or args.jsonl) and is_image(name):
+            try:
+                yield Record(Image(name), name, name, 1, image=True)
+            except JevError as e:
+                yield f"{label}: {e}"
+            continue
         try:
             with _open(name, private=stop is not None) as f:
                 if args.csv:
