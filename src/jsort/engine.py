@@ -9,7 +9,7 @@ from numbers import Integral
 
 import numpy as np
 
-from jevkit_runtime import Budget, Client, JevBudgetExceeded, JevError, JevFatal
+from jevkit_runtime import Budget, Client, Image, JevBudgetExceeded, JevError, JevFatal
 from jevkit_runtime.cli import run_sync
 from .model import Fit, fit, information, reliability, shortfall, standard_errors
 from .scale import DEFAULT_ANCHORS, Scale, build, identity, question  # noqa: F401  (question is part of this module's API)
@@ -59,7 +59,7 @@ DEFAULT_BUDGET = 1.0  # dollars: a command that bills per question needs a seat 
 
 async def arank(texts: list[str], description: str, jev: Client, *, per_item: int = 10, top: int | None = None,
                 lowest: bool = False, seed: int = 0, max_chars: int = 8000, concurrency: int = 32,
-                budget: Budget | None = None, progress=None) -> Ranking:
+                budget: Budget | None = None, progress=None, images: bool = False) -> Ranking:
     """Place texts on a scale by asking Jev about pairs of them.
 
     per_item is the number of comparisons each text takes part in, so the whole run asks about
@@ -68,7 +68,8 @@ async def arank(texts: list[str], description: str, jev: Client, *, per_item: in
     With lowest as well, it is the bottom of the scale that is wanted, and the hunt runs the other way.
     Identical and blank texts are handled here: duplicates share one score and blanks get none.
     Spending is the client's budget, or `budget` for this run alone: a comparison it has no room for is
-    not asked, and the run sorts on the answers it has.
+    not asked, and the run sorts on the answers it has. With images, the texts are `Image`s and the
+    question asks about pictures.
     """
     if not description.strip():
         raise ValueError("description must not be empty")
@@ -78,13 +79,13 @@ async def arank(texts: list[str], description: str, jev: Client, *, per_item: in
             continue
         if not isinstance(value, Integral) or value < minimum:
             raise ValueError(f"{name} must be an integer of at least {minimum}")
-    shown = [t[:max_chars] for t in texts]
+    shown = [t if isinstance(t, Image) else t[:max_chars] for t in texts]   # a picture is never cut
     unique: dict[str, int] = {}
     member = [unique.setdefault(t, len(unique)) if t.strip() else -1 for t in shown]
     items = list(unique)
     n = len(items)
 
-    q = question(description)
+    q = question(description, images)
     schedule = Schedule(n, seed)
     first: list[int] = []
     second: list[int] = []

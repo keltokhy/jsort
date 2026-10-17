@@ -159,8 +159,9 @@ class Writer:
             if args.jsonl and args.score and isinstance(rec.data, dict):
                 body = json.dumps(rec.data | s, ensure_ascii=False)
             else:
-                body = ((f"{rec.file}:" if args.with_filename and not args.whole else "")
-                        + (f"{rec.lineno}:" if args.line_number and not args.whole else "") + rec.original)
+                whole = args.whole or rec.image
+                body = ((f"{rec.file}:" if args.with_filename and not whole else "")
+                        + (f"{rec.lineno}:" if args.line_number and not whole else "") + rec.original)
                 if args.score:
                     body = f"{_number(score, 2)}\t{_number(se, 2)}\t{body}"
             self.out.write(body + ("\n\n" if args.para else "\n"))
@@ -324,6 +325,13 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
                 pass
         return 2 if problems else 0
 
+    images = any(r.image for r in records)
+    if images and not all(r.image for r in records):
+        print("jsort: a run sorts texts or images, not both; give it only image files or only text", file=err)
+        return 2
+    if images and (placing or args.save_scale):
+        print("jsort: --scale and --save-scale do not work with images yet", file=err)
+        return 2
     texts = [r.text for r in records]
     shown = [t[:args.max_chars] for t in texts]
     truncated = sum(len(t) > args.max_chars for t in texts)
@@ -362,7 +370,7 @@ def main(argv: list[str] | None = None, *, transport=None, out=None, err=None) -
             try:
                 return await arank(texts, description, jev, per_item=args.per_item, top=args.top, lowest=args.reverse,
                                    seed=args.seed, max_chars=args.max_chars, concurrency=args.concurrency,
-                                   progress=progress)
+                                   progress=progress, images=images)
             finally:
                 await jev.close()
 

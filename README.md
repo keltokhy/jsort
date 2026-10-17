@@ -353,6 +353,26 @@ gets no more questions. A text that lost 0.03 to 0.97 against a middling opponen
 further comparison will change that. In simulation this is the same cost as a full sort or a little
 less, and finds more of the true top ten (0.85 against 0.77 of them, among 2,000 texts).
 
+## Images (experimental)
+
+PNG and JPEG files sort by what their pictures show, and print by name. Four drawings with 1, 3, 6
+and 10 red dots, sorted through TypeSafe's API:
+
+```console
+$ jsort -o "more red dots" dots*.jpg
+5.25	1.18	dots10.jpg
+1.59	0.96	dots06.jpg
+-1.67	0.96	dots03.jpg
+-5.16	1.26	dots01.jpg
+jsort: 4 texts, 12 comparisons in 5 rounds; reliability 0.92; first-position lean -0.01; 12 calls, 0 cached; 34,980 tokens; $0.0015; budget $1.00; 2.1s
+```
+
+Each comparison shows Jev both pictures, fitted to 1568 pixels on the longest side, and bills them
+as input tokens: about 2,900 a comparison for these 800 x 600 drawings. A run sorts images or texts,
+not both, and `--scale` and `--save-scale` do not take images yet. TypeSafe's API, OpenRouter and a
+gateway read images; the local servers do not. Install with `uv tool install 'jev-sort[images]'`.
+TypeSafe calls images experimental, so the format and accuracy may change.
+
 ## Cost
 
 A comparison bills about 270 tokens of overhead plus both texts and the description. For short lines
